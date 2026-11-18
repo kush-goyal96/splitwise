@@ -8,7 +8,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.database import DbSession, engine
 from app.models import Base
-from app.routers import expenses, groups, users
+from app.routers import expenses, groups, settlements, users
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +26,7 @@ app = FastAPI(lifespan=lifespan)
 app.include_router(users.router)
 app.include_router(groups.router)
 app.include_router(expenses.router)
+app.include_router(settlements.router)
 
 
 @app.get("/health")
