@@ -1,18 +1,31 @@
 import logging
-from typing import Annotated
+from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, status
+from fastapi import FastAPI, status
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session
 
-from app.database import get_db
+from app.database import DbSession, engine
+from app.models import Base
+from app.routers import expenses, groups, users
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI()
-DbSession = Annotated[Session, Depends(get_db)]
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Runs when the application starts
+    Base.metadata.create_all(bind=engine)
+
+    yield
+    engine.dispose()
+
+
+app = FastAPI(lifespan=lifespan)
+app.include_router(users.router)
+app.include_router(groups.router)
+app.include_router(expenses.router)
 
 
 @app.get("/health")
@@ -34,3 +47,4 @@ def health_check(db: DbSession):
         "app": "ok",
         "database": "connected",
     }
+

@@ -171,6 +171,10 @@ DECISIONS
 5. An equal split with no participants listed is split between all group members.
    Most real expenses are shared by the whole group, so this is the convenient default.
    To split between only some members, list their user ids explicitly.
+
+6. Tables are created with Base.metadata.create_all on app startup, not with migrations.
+   create_all only creates missing tables; it never alters existing ones, so a model change needs a fresh database (docker compose down -v).
+   A production version would use Alembic migrations so the schema can evolve without data loss.
 ```
 
 ## 3. API
@@ -324,7 +328,7 @@ GET /groups/{group_id}/balances/{user_id}
   response 200 {
     user_id
     net
-    with   [ { user_id, user_name, amount } ]   <- positive = they owe you
+    balances   [ { user_id, user_name, amount } ]   <- positive = they owe you
   }
   errors
     404  group or user not found
