@@ -29,12 +29,11 @@ def get_group_balances(group_id: uuid.UUID, db: DbSession) -> GroupBalances:
 def get_user_balance_in_group(
     group_id: uuid.UUID, user_id: uuid.UUID, db: DbSession
 ) -> UserGroupBalance:
-    rows = service.user_balance_in_group(db, group_id, user_id)
+    result = service.user_balance_in_group(db, group_id, user_id)
     return UserGroupBalance(
         user_id=user_id,
-        # The pairwise amounts always add up to the user's group net.
-        net=sum(row.amount for row in rows),
-        balances=[PairwiseBalance(**row._asdict()) for row in rows],
+        net=result.net,
+        balances=[PairwiseBalance(**row._asdict()) for row in result.balances],
     )
 
 
@@ -46,9 +45,9 @@ def get_simplified_debts(group_id: uuid.UUID, db: DbSession) -> SimplifiedDebts:
 
 @router.get("/users/{user_id}/balances", response_model=UserBalances)
 def get_user_balances(user_id: uuid.UUID, db: DbSession) -> UserBalances:
-    rows = service.user_balances(db, user_id)
+    result = service.user_balances(db, user_id)
     return UserBalances(
         user_id=user_id,
-        total_net=sum(row.net for row in rows),
-        groups=[GroupNet(**row._asdict()) for row in rows],
+        total_net=result.total_net,
+        groups=[GroupNet(**row._asdict()) for row in result.groups],
     )

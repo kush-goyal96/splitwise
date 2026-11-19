@@ -70,10 +70,10 @@ def test_user_balances_read_one_snapshot(api, trip, db, some_activity, write_dur
     before = api.user_balances(trip.kush)["groups"]
     state = write_during_read()
 
-    rows = balances_service.user_balances(db, uuid.UUID(trip.kush))
+    result = balances_service.user_balances(db, uuid.UUID(trip.kush))
 
     assert state["written"]
-    assert [{"group_id": str(r.group_id), "group_name": r.group_name, "net": r.net} for r in rows] == before
+    assert [{"group_id": str(r.group_id), "group_name": r.group_name, "net": r.net} for r in result.groups] == before
     assert api.user_balances(trip.kush)["groups"] != before
 
 
@@ -83,10 +83,10 @@ def test_pairwise_reads_one_snapshot(api, trip, db, some_activity, write_during_
     before = api.pairwise(trip.group, trip.shivanshu)
     state = write_during_read()
 
-    rows = balances_service.user_balance_in_group(db, uuid.UUID(trip.group), uuid.UUID(trip.shivanshu))
+    result = balances_service.user_balance_in_group(db, uuid.UUID(trip.group), uuid.UUID(trip.shivanshu))
 
     assert state["written"]
-    assert {str(row.user_id): row.amount for row in rows} == before
+    assert {str(row.user_id): row.amount for row in result.balances} == before
     assert api.pairwise(trip.group, trip.shivanshu) != before
 
 

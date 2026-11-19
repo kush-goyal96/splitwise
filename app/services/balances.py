@@ -43,6 +43,16 @@ class GroupNet(NamedTuple):
     net: int
 
 
+class PairwiseResult(NamedTuple):
+    net: int  # the user's net in the group: always the sum of the pairwise amounts
+    balances: list[PairwiseAmount]
+
+
+class UserTotals(NamedTuple):
+    total_net: int  # across all the user's groups: the sum of the group nets
+    groups: list[GroupNet]
+
+
 # ---------- Use cases ----------
 
 
@@ -57,9 +67,9 @@ def group_balances(db: Session, group_id: uuid.UUID) -> list[MemberNet]:
 
 def user_balance_in_group(
     db: Session, group_id: uuid.UUID, user_id: uuid.UUID
-) -> list[PairwiseAmount]:
-    """What each other member owes the user (positive) or is owed by them (negative).
-    The amounts add up to the user's net in the group."""
+) -> PairwiseResult:
+    """What each other member owes the user (positive) or is owed by them (negative),
+    and the user's net in the group, which those amounts always add up to."""
     use_snapshot(db)
     get_group(db, group_id)
     get_user(db, user_id)
@@ -68,14 +78,16 @@ def user_balance_in_group(
     if user_id not in names:
         raise RuleViolationError("user is not a member of the group")
     owed = _pairwise(db, group_id, user_id, list(names))
-    return [PairwiseAmount(other, names[other], amount) for other, amount in owed.items()]
+    balances = [PairwiseAmount(other, names[other], amount) for other, amount in owed.items()]
+    return PairwiseResult(net=sum(row.amount for row in balances), balances=balances)
 
 
-def user_balances(db: Session, user_id: uuid.UUID) -> list[GroupNet]:
-    """The user's net in each of their groups, ordered by group name."""
+def user_balances(db: Session, user_id: uuid.UUID) -> UserTotals:
+    """The user's net in each of their groups (ordered by group name), and the total."""
     use_snapshot(db)
     get_user(db, user_id)
-    return [GroupNet(*row) for row in _user_group_nets(db, user_id)]
+    groups = [GroupNet(*row) for row in _user_group_nets(db, user_id)]
+    return UserTotals(total_net=sum(row.net for row in groups), groups=groups)
 
 
 def simplified_debts(db: Session, group_id: uuid.UUID) -> list[Transfer]:
