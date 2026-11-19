@@ -48,7 +48,10 @@ class Group(Base):
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
     name: Mapped[str] = mapped_column(String(100))
 
-    members: Mapped[list[User]] = relationship(secondary="group_members")
+    # Ordered, so API responses are deterministic (same order as the balance endpoints).
+    members: Mapped[list[User]] = relationship(
+        secondary="group_members", order_by=(User.user_name, User.id)
+    )
 
 
 class GroupMember(Base):
@@ -83,9 +86,12 @@ class Expense(Base):
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     # Saving an Expense saves its shares too; removing a share from the list deletes it
-    # (used when an edit replaces the shares).
+    # (used when an edit replaces the shares). Ordered by user_id: without an ORDER BY,
+    # Postgres returns rows in storage order, which changes when an edit replaces them.
     shares: Mapped[list["ExpenseShare"]] = relationship(
-        back_populates="expense", cascade="all, delete-orphan"
+        back_populates="expense",
+        cascade="all, delete-orphan",
+        order_by="ExpenseShare.user_id",
     )
 
 
