@@ -1,0 +1,3 @@
+# Store and check out text files with LF line endings on every machine, so `git archive`
+# and clones on Windows (core.autocrlf=true) never produce CRLF files for the Linux containers.
+* text=auto eol=lf
