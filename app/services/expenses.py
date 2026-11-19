@@ -3,11 +3,13 @@ from collections.abc import Sequence
 from decimal import Decimal
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app.domain.splits import SplitStrategy, calculate_shares
 from app.errors import NotFoundError
 from app.models import ACTIVE_EXPENSE, Expense, ExpenseShare
+from app.services import idempotency
 from app.services.groups import get_group, get_member_ids, require_members
 
 Splits = Sequence[tuple[uuid.UUID, Decimal | None]]
@@ -25,7 +27,21 @@ def create_expense(
     paid_by: uuid.UUID,
     strategy: SplitStrategy,
     splits: Splits,
-) -> Expense:
+    idempotency_key: uuid.UUID | None = None,
+    fingerprint: str | None = None,
+) -> tuple[Expense, bool]:
+    """Create an expense. Returns (expense, replayed).
+
+    With an idempotency_key (decision 10), a retry of an earlier request returns the expense
+    that request created (replayed=True) instead of recording the money twice.
+    """
+    if (idempotency_key is None) != (fingerprint is None):
+        raise ValueError("idempotency_key and fingerprint go together")
+    if idempotency_key is not None:
+        existing = idempotency.find_by_key(db, Expense, group_id, idempotency_key)
+        if existing is not None:
+            return idempotency.replay(existing, fingerprint), True
+
     get_group(db, group_id)
     shares = _calculate_shares(
         db, group_id, amount=amount, paid_by=paid_by, strategy=strategy, splits=splits
@@ -37,12 +53,22 @@ def create_expense(
         amount=amount,
         paid_by=paid_by,
         shares=_share_rows(shares),
+        idempotency_key=idempotency_key,
+        request_fingerprint=fingerprint,
     )
     db.add(expense)
     # One commit: the expense and all its shares are saved together, or not at all.
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as error:
+        db.rollback()
+        if idempotency_key is None or not idempotency.is_key_conflict(error, Expense):
+            raise
+        # A concurrent request with the same key committed first: this is a retry of it.
+        winner = idempotency.find_by_key(db, Expense, group_id, idempotency_key)
+        return idempotency.replay(winner, fingerprint), True
     db.refresh(expense)
-    return expense
+    return expense, False
 
 
 def update_expense(

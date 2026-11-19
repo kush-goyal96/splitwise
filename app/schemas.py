@@ -101,6 +101,24 @@ class ExpenseCreate(BaseModel):
     # Empty is only valid for "equal" (= split between all members); checked in the service.
     splits: list[SplitEntry] = Field(default_factory=list)
 
+    def fingerprint_data(self) -> dict:
+        """Canonical form for the Idempotency-Key fingerprint: equivalent requests are equal.
+
+        A client's retry may rebuild the body slightly differently, so splits are sorted by
+        user (the order never changes the result) and values are normalised ("50" == "50.00").
+        Names were already stripped by validation.
+        """
+        splits = [
+            [str(entry.user_id), None if entry.value is None else str(entry.value.normalize())]
+            for entry in self.splits
+        ]
+        return {
+            "name": self.name,
+            "amount": self.amount,
+            "paid_by": str(self.paid_by),
+            "split_strategy": self.split_strategy.value,
+            "splits": sorted(splits, key=lambda pair: pair[0]),
+        }
 
 
 class ShareRead(ORMModel):
@@ -135,6 +153,10 @@ class SettlementCreate(BaseModel):
         if self.payer_id == self.payee_id:
             raise ValueError("payer_id and payee_id must be different users")
         return self
+
+    def fingerprint_data(self) -> dict:
+        """Canonical form for the Idempotency-Key fingerprint."""
+        return {"payer_id": str(self.payer_id), "payee_id": str(self.payee_id), "amount": self.amount}
 
 
 class SettlementRead(ORMModel):

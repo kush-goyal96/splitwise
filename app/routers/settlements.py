@@ -1,8 +1,9 @@
 import uuid
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Response, status
 
 from app.database import DbSession
+from app.idempotency import REPLAYED_HEADER, IdempotencyKey, fingerprint
 from app.models import Settlement
 from app.schemas import SettlementCreate, SettlementList, SettlementRead
 from app.services import settlements as service
@@ -11,14 +12,25 @@ router = APIRouter(prefix="/groups/{group_id}/settlements", tags=["settlements"]
 
 
 @router.post("", response_model=SettlementRead, status_code=status.HTTP_201_CREATED)
-def create_settlement(group_id: uuid.UUID, payload: SettlementCreate, db: DbSession) -> Settlement:
-    return service.create_settlement(
+def create_settlement(
+    group_id: uuid.UUID,
+    payload: SettlementCreate,
+    db: DbSession,
+    response: Response,
+    idempotency_key: IdempotencyKey = None,
+) -> Settlement:
+    settlement, replayed = service.create_settlement(
         db,
         group_id,
         payer_id=payload.payer_id,
         payee_id=payload.payee_id,
         amount=payload.amount,
+        idempotency_key=idempotency_key,
+        fingerprint=fingerprint(payload.fingerprint_data()) if idempotency_key else None,
     )
+    if replayed:
+        response.headers[REPLAYED_HEADER] = "true"
+    return settlement
 
 
 @router.get("", response_model=SettlementList)
