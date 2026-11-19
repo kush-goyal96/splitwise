@@ -1,12 +1,14 @@
 """The health check, and the API-wide error conventions from DESIGN.md:
 the status code carries success or failure, and errors return {"detail": ...}."""
 
+import json
 import logging
 
 from sqlalchemy.exc import OperationalError
 
 from app.database import get_db
-from app.main import app
+from app.errors import DomainError
+from app.main import app, handle_domain_error
 from tests.integration.helpers import random_id
 
 
@@ -48,3 +50,16 @@ def test_error_body_shapes(client):
 
     # A malformed id in the path is a 422, not a 404 or a 500.
     assert client.get("/groups/not-a-uuid").status_code == 422
+
+
+def test_an_unmapped_domain_error_is_a_clean_500(caplog):
+    # A new DomainError subclass that someone forgot to map must not crash the handler.
+    class UnmappedError(DomainError):
+        pass
+
+    with caplog.at_level(logging.ERROR):
+        response = handle_domain_error(None, UnmappedError("internal detail"))
+
+    assert response.status_code == 500
+    assert json.loads(response.body) == {"detail": "Internal Server Error"}  # the message isn't leaked
+    assert "No HTTP status mapped for UnmappedError" in caplog.text

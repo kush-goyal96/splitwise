@@ -42,8 +42,17 @@ app.include_router(balances.router)
 def handle_domain_error(request: Request, exc: DomainError) -> JSONResponse:
     # Subclasses (e.g. SplitError) map through their base class.
     status_code = next(
-        code for error_type, code in DOMAIN_ERROR_STATUS.items() if isinstance(exc, error_type)
+        (code for error_type, code in DOMAIN_ERROR_STATUS.items() if isinstance(exc, error_type)),
+        None,
     )
+    if status_code is None:
+        # A DomainError subclass nobody mapped is a programming error, not the client's fault:
+        # log it and return a plain 500 rather than crashing inside the handler.
+        logger.error("No HTTP status mapped for %s: %s", type(exc).__name__, exc)
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"detail": "Internal Server Error"},
+        )
     return JSONResponse(status_code=status_code, content={"detail": str(exc)})
 
 
