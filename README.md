@@ -1,16 +1,15 @@
 # SplitWise Backend
 
-A REST API for splitting shared expenses within groups: record who paid for what, split it equally, by exact amounts or by percentage, and see who owes whom, in each group and across all of a user's groups.
+A REST API for sharing expenses within groups. Friends form a group, record who paid for what and how it's split, and the service works out who owes whom: in each group, between any two people, and across all of a user's groups.
 
-**FastAPI · SQLAlchemy 2 · PostgreSQL 16 · Docker Compose · pytest + Hypothesis (162 tests)**
-
-| Requirement | Where it's met |
-|---|---|
-| Create transactions, split equally or unequally | `POST /groups/{id}/expenses`: `equal`, `exact` or `percentage` |
-| See what each person owes | `GET /groups/{id}/balances`: every member's net balance |
-| See what a user is owed in each group | `GET /groups/{id}/balances/{user_id}`: who owes this user, and whom this user owes |
-| See the total across all groups | `GET /users/{id}/balances`: net per group, plus `total_net` |
-| *Beyond the brief* | Settlements, editing and deleting, debt simplification, safe retries (idempotency keys) |
+**What it does**
+- **Groups and members:** create users and groups, and add people to groups.
+- **Expenses:** one person pays; the cost is split **equally** (between everyone or a chosen few), by **exact amounts**, or by **percentage**, always to the exact paisa.
+- **Settlements:** record a payment from one member to another to pay off a debt.
+- **Balances:** each member's net balance in a group, what each person owes you within a group, and your net in every group plus the overall total.
+- **Settle up:** the fewest payments that would settle everyone in a group.
+- **Edits and deletes:** expenses and settlements can be edited or deleted. Deleted records are kept for the audit trail, and edit forms can be pre-filled with the split exactly as it was entered.
+- **Safe retries:** a client that loses a response can resend the request without recording the money twice.
 
 ---
 
@@ -159,7 +158,7 @@ flowchart LR
         S["<b>services/</b><br/>one function per use case:<br/>database work +<br/>business rules"]
         D["<b>domain/</b><br/>pure calculations:<br/>split maths,<br/>debt simplification"]
         E["<b>errors.py</b><br/>NotFound · RuleViolation · Conflict<br/>(no HTTP knowledge)"]
-        H["<b>main.py</b><br/>one exception handler:<br/>404 · 422 · 409"]
+        H["<b>main.py</b><br/>one exception handler:<br/>404 · 422 · 409<br/>(400 for a missing Idempotency-Key)"]
     end
 
     R --> S --> D
@@ -190,14 +189,15 @@ sequenceDiagram
     participant D as domain/splits
     participant DB as Postgres
 
-    C->>R: POST /groups/{id}/expenses
-    R->>R: Pydantic: shape, types, amount > 0
-    R->>S: create_expense(...)
+    C->>R: POST /groups/{id}/expenses + Idempotency-Key
+    R->>R: Pydantic: shape, types, 0 < amount ≤ 10¹²
+    R->>S: create_expense(..., key, request fingerprint)
+    S->>DB: key seen before? → return that expense (a retry)
     S->>DB: group exists? member ids?
     S->>S: payer and participants are members?
     S->>D: calculate_shares(amount, strategy, splits)
     D-->>S: {user_id: paise}, summing to amount
-    S->>DB: INSERT expense + shares (one transaction)
+    S->>DB: INSERT expense + shares + key (one transaction)
     S-->>R: Expense
     R-->>C: 201 + shares
     Note over S,C: Any rule broken → domain error → handler → 404/422/409
@@ -312,6 +312,7 @@ Constraint names come from a **naming convention** (`models.py`), so they are pr
 They need more than one row, so a CHECK constraint can't express them:
 - An expense's shares add up to its amount (asserted in `domain/splits.py`).
 - Everyone involved in a group transaction is a member of the group: the payer, every participant, and both people in a settlement.
+- A request that reuses an `Idempotency-Key` must match the original request's fingerprint.
 
 ### Choices in the schema
 
@@ -323,6 +324,9 @@ They need more than one row, so a CHECK constraint can't express them:
 | **Every share stored, even for equal splits, next to the split as entered** | Balance queries only read the calculated `amount`: a share is a share. The inputs (`split_strategy`, `input_value`) are kept so an edit form can show the split again; 33.33 % can't be recovered from 3333 paise. |
 | **Indexes on every foreign key** | Postgres doesn't index foreign keys automatically. The balance queries filter and group on exactly these columns. `group_members.user_id` has its own index because the composite primary key only helps lookups that start with `group_id`. |
 | **`timestamptz`** | Stored in UTC, with no ambiguity across time zones. |
+| **`split_strategy` as `VARCHAR` + `CHECK`**, not a Postgres `ENUM` | Adding a strategy later is a one-line constraint change; altering an `ENUM` type is awkward and can't run inside every migration. |
+| **Soft-delete and edit timestamps on the row** | `deleted_at` keeps deleted expenses and settlements (and their shares) for the audit trail; `updated_at` shows when a record last changed. |
+| **The idempotency key stored on the row** | The key commits in the same transaction as the expense or settlement it created, so the two can never disagree, and there's no separate table to expire or clean up. |
 
 ---
 
@@ -341,6 +345,8 @@ They need more than one row, so a CHECK constraint can't express them:
 2. Otherwise, **the participant with the lowest user id**.
 
 Rounding down means the leftover is never negative and is always less than 1 paisa per person. The rule is deterministic: the same request always gives the same shares, whatever order the participants are listed in.
+
+**Equal with no list means "everyone in the group right now".** The participants are stored as share rows, so someone who joins the group later isn't added to old expenses.
 
 `Decimal` is used for percentages, never `float`.
 
@@ -380,6 +386,8 @@ net = (what you paid for expenses) − (your shares) + (settlements you paid) �
 At this scale, correctness wins. If reads ever became the bottleneck, a cache or materialized view could be added **in front of** the source of truth without changing the model.
 
 The query count doesn't grow with the number of groups. A user's totals across 50 groups are still 5 queries, not 4 × 50 + 1. This avoids the N+1 query problem.
+
+**Every list has a fixed order**, so the same data always gives the same response: members and balances by name, a user's groups by group name, shares by user id, expenses and settlements newest first (with the time-ordered id as a tie-break).
 
 ### One consistent snapshot per read
 
@@ -492,17 +500,25 @@ Full client contract and edge cases: [DESIGN.md decision 10](DESIGN.md#tables-ru
 |---|---|---|---|
 | **PostgreSQL** | MongoDB or another document store | The data is relational (users ↔ groups ↔ expenses ↔ shares), balances are aggregations, and correctness depends on transactions and constraints | — |
 | **Integer paise** | `float` / `NUMERIC` rupees | Exact arithmetic; integer `SUM`s are fast | Convert to rupees for display |
+| **`Decimal` for percentages** | `float` | 33.33 % is exact; the rounding rule is applied explicitly, never by accident | — |
+| **Amounts capped at 10¹² paise (₹1000 crore)** | No cap (BIGINT's own limit) | An oversized amount is a clear 422 instead of a database overflow (500) | Larger single amounts aren't accepted |
+| **Three layers: routers, services, domain** | Logic in the route handlers | The split maths is pure and unit-testable; each rule lives in one place; errors don't know about HTTP | A little more structure for a small app |
 | **Balances calculated on read** | Stored running balances | Can't drift; edits and deletes are free | A few `SUM`s per read (§6) |
 | **REPEATABLE READ for balance reads** | Default READ COMMITTED | Consistent multi-query reads | Slightly more snapshot bookkeeping in Postgres |
 | **Leftover paisa to the payer** | Spread it out; or to the first listed | Deterministic and intuitive | One person may carry up to n − 1 extra paise |
 | **Equal split with no list = whole group** | Always require a list | Matches the common case | A client must list ids to split between a subset |
+| **Adding members is all or nothing** | Add the users that exist, skip the rest | A typo in one id never leaves a half-built group | One bad id rejects the whole request (404, listing every unknown id) |
+| **404 for an unknown user, 422 for a user outside the group** | 404 for both | The client can tell a wrong id from a wrong group | — |
 | **Soft delete** | Hard delete | Audit trail, undo | Every query must filter (enforced by one shared expression + tests) |
 | **Store the split as entered, edit with PUT** | Store only the calculated shares | The edit screen can show the original split (percentages can't be recovered from paise) | Two extra columns; PATCH is possible but not built yet |
 | **Idempotency key required, stored on the row** | Optional key; or a separate idempotency table storing whole responses | First-party backend recording money, so safe retries are part of the contract. Same transaction as the row, so they can't disagree; no expiry or cleanup job | Every client must send a key; keys never expire |
+| **Row lock (`SELECT … FOR UPDATE`) on edit and delete** | No lock; or optimistic locking | Concurrent writes to one expense run one after another, so share replacements can't collide and a late edit after a delete is a clean 404 | Writers to the *same* row wait briefly |
 | **Last write wins on concurrent edits** | Optimistic locking (`ETag` / `If-Match` → 412); or PATCH | No client yet to resolve conflicts; PATCH would only protect edits to *different* fields | A lost update is possible (documented) |
+| **Insert, then handle the unique violation** (phone numbers, idempotency keys) | Check first, then insert | The UNIQUE constraint decides, so two simultaneous requests can't both pass a check | The handler identifies the constraint by name (hence the naming convention) |
+| **Every list has a fixed order** | Whatever order Postgres returns | Same data, same response; a test caught share order changing after an edit | An `ORDER BY` on each list query |
 | **Greedy debt simplification** | An exact minimum | Exact is NP-hard; greedy is ≤ n − 1 and O(n log n) | Occasionally one more payment than optimal |
 | **`create_all` on startup** | Alembic migrations | Fewer moving parts for a project with no deployed data | A model change needs `docker compose down -v` |
-| **No auth: requests carry no caller identity** | JWT or sessions | The brief is the splitting logic | Any client can read or change any group, and changes aren't attributed to anyone (see §13) |
+| **No auth: requests carry no caller identity** | JWT or sessions | This version focuses on the splitting and balance logic; the design leaves a clear place for auth (§13) | Any client can read or change any group, and changes aren't attributed to anyone |
 | **Sync endpoints** | `async` + asyncpg | SQLAlchemy sync is simpler and runs in FastAPI's thread pool; the load is I/O-light | Fewer concurrent requests per worker than async |
 | **Tests on real Postgres** | SQLite in memory | The behaviour under test *is* Postgres: `ON CONFLICT`, row locks, snapshots, constraint names | Tests need Docker (about a minute) |
 | **Containers run as a non-root user** | The image default (root) | Least privilege: a compromised process can't rewrite the code (owned by root) or act as root | — |
@@ -541,6 +557,7 @@ Full request and response bodies, and every error case, are in **[DESIGN.md §3]
 - Request-shape errors (from Pydantic) return `{"detail": [{"loc": [...], "msg": "..."}]}`.
 - **404** means the thing doesn't exist. **422** means it exists but the request breaks a rule, e.g. the user isn't a member of this group.
 - Amounts are integers in paise from 1 to 10¹². POSTs that record money **require** an `Idempotency-Key: <uuid>` header (400 if missing).
+- Lists have a fixed order (see [§6](#6-how-balances-work)). They aren't paginated yet (§13).
 
 ---
 
@@ -588,15 +605,23 @@ What is deliberately out of scope, and what a production version would add:
 
 | Area | Now | Production |
 |---|---|---|
-| **Auth** | None: requests carry no caller identity. `paid_by` and `payer_id` describe the transaction, not who sent it. | JWT or OAuth identifies the caller; only group members can read or write a group; `created_by` / `updated_by` record *who* made each change |
+| **Auth** | None: requests carry no caller identity. `paid_by` and `payer_id` describe the transaction, not who sent it. | Phone sign-in through an identity provider (e.g. Firebase Auth or Auth0); the API verifies its JWTs in one dependency and passes the caller's id to every service. Only group members can read or write a group (401 / 403); `created_by` / `updated_by` record *who* made each change |
+| **Balances across groups, per person** | Per person within one group; per group for one user | `GET /users/{id}/balances/people`: what each person owes you across all shared groups, with a per-group breakdown (the same pairwise sums, grouped by group and person, in a fixed number of queries) |
+| **Settling up across groups** | Settlements belong to one group | A "settle up with this person" action that records one settlement per group, since a single cross-group payment would leave each group's balance non-zero |
 | **Schema changes** | `create_all` on startup | **Alembic** migrations, run as a deploy step |
 | **Concurrent edits** | Last write wins (writes are serialized, so nothing is corrupted) | Optimistic locking: a version exposed as an `ETag`; edits send `If-Match`, 412 if stale, 428 if missing |
+| **Partial edits** | `PUT` (full replacement, pre-filled from GET) | `PATCH`, merging the changed fields with the stored split, now possible because the split is stored as entered |
 | **Edit history and undo** | Edits overwrite; deletes are soft | An append-only `audit_log` (entity, action, `actor_id`, `before` / `after` JSONB snapshots incl. shares, timestamp), written **in the same transaction** as each create, update and delete. It powers an activity feed and undo, where undo is itself a new logged operation, never a rewrite of the log. Undo can be limited to a 30-day window, but the log itself is kept long-term (money disputes need it), with monthly partitions so old data can be archived cheaply. Needs auth first, so `actor_id` can record *who*. |
 | **Lists** | Not paginated | Cursor pagination on `(created_at, id)`, cheap because ids are UUIDv7 |
 | **Read performance** | Calculated on every request | Partial indexes `WHERE deleted_at IS NULL`; a cached or materialized balance view if reads dominate |
+| **Balance queries** | A few `SUM` queries per use case, each applying the soft-delete filter | One ledger subquery (signed entries per person and counterparty) that all balance views read, so the filter lives in one place |
+| **Membership rule** | Checked in application code | Also enforced by the database: composite foreign keys from expenses, shares and settlements to `group_members` |
+| **Phone numbers** | Validated as 7–15 digits; `+919800000001` and `919800000001` are different users | Normalised to E.164 (e.g. with the `phonenumbers` library) before storing |
 | **Money** | One currency (INR) | A currency column per group or expense; conversion at a recorded rate |
 | **Expenses** | One payer | Multiple payers: a `payments` table mirroring `expense_shares` |
-| **Groups** | Members can't leave | Leaving or removal, allowed only at a zero balance |
+| **Groups and users** | Members can't leave; users and groups can't be deleted | Leaving or removal, allowed only at a zero balance; deleting a group or account, with its history kept |
+| **Notifications** | None | Tell members when an expense involving them is added, edited or deleted, driven by the audit log |
+| **Frontend** | None: the API, with Swagger docs | Web or mobile client: generates idempotency keys, pre-fills edit forms from GET |
 | **Operations** | `/health`, logging of database failures, containers run as non-root | Structured logs with request ids, metrics, tracing, rate limiting, CI running the test suite on every PR, a pinned and scanned base image |
 
 ---
