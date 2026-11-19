@@ -20,9 +20,11 @@ The service works out who owes whom, in each group and across all of a user's gr
   - a user's balance in each group and the total across all groups
 - Input validation and tests for the splitting and balance logic
 
-**Stretch** (built only after the core, tests and README are done)
-1. Editing and deleting expenses and settlements
-2. Debt simplification: the fewest payments needed to settle a group
+**Beyond the brief** (built after the core)
+- Editing and soft-deleting expenses and settlements
+- Debt simplification: the fewest payments needed to settle a group
+- Safe retries: a required Idempotency-Key on the POSTs that record money
+- The split stored as entered, so an edit form can be pre-filled
 
 **Out of scope** (future work)
 - Authentication and authorization: requests carry no caller identity. Fields like paid_by
@@ -64,9 +66,9 @@ erDiagram
         BIGINT amount "paise"
         UUID paid_by FK
         string split_strategy "as entered"
-        DATETIME created_at
-        DATETIME updated_at "nullable"
-        DATETIME deleted_at "nullable, soft delete"
+        timestamptz created_at
+        timestamptz updated_at "nullable"
+        timestamptz deleted_at "nullable, soft delete"
         UUID idempotency_key
         string request_fingerprint
     }
@@ -84,9 +86,9 @@ erDiagram
         UUID payer_id FK
         UUID payee_id FK
         BIGINT amount "paise"
-        DATETIME created_at
-        DATETIME updated_at "nullable"
-        DATETIME deleted_at "nullable, soft delete"
+        timestamptz created_at
+        timestamptz updated_at "nullable"
+        timestamptz deleted_at "nullable, soft delete"
         UUID idempotency_key
         string request_fingerprint
     }
@@ -109,56 +111,64 @@ erDiagram
 
 ```text
 SCHEMA
-All amounts are BIGINT in paise (₹1 = 100 paise, so ₹500 is stored as 50000).
+Matches the DDL generated from app/models.py. Every column is NOT NULL unless marked NULL.
+Money is BIGINT paise (₹1 = 100 paise, so ₹500 is stored as 50000). Timestamps are
+timestamptz (stored in UTC). Constraint and index names come from the naming convention in
+models.py; every foreign key is named fk_<table>_<column>_<referenced table>.
 
 users
-  id              UUIDv7   PK
-  phone_number    string   UNIQUE
-  user_name       string
+  id                   UUID (v7)        PK                          pk_users
+  phone_number         VARCHAR(20)      UNIQUE                      uq_users_phone_number
+  user_name            VARCHAR(100)
 
 groups
-  id              UUIDv7   PK
-  name            string
+  id                   UUID (v7)        PK                          pk_groups
+  name                 VARCHAR(100)     not unique
 
 group_members
-  group_id        UUIDv7   FK -> groups.id
-  user_id         UUIDv7   FK -> users.id
-  PK (group_id, user_id)
+  group_id             UUID             FK -> groups.id
+  user_id              UUID             FK -> users.id              INDEX ix_group_members_user_id
+  PK (group_id, user_id)                                            pk_group_members
 
 expenses
-  id              UUIDv7   PK
-  group_id        UUIDv7   FK -> groups.id
-  name            string
-  amount          BIGINT   (paise)
-  paid_by         UUIDv7   FK -> users.id
-  split_strategy  string   equal | exact | percentage, as entered (decision 3)
-  created_at      DATETIME
-  updated_at      DATETIME NULL   (set on edit)
-  deleted_at      DATETIME NULL   (soft delete: NULL = active)
-  idempotency_key UUID           (client's Idempotency-Key, decision 10)
-  request_fingerprint  string    (SHA-256 of the canonical request)
-  UNIQUE (group_id, idempotency_key)
+  id                   UUID (v7)        PK                          pk_expenses
+  group_id             UUID             FK -> groups.id             INDEX ix_expenses_group_id
+  name                 VARCHAR(200)
+  amount               BIGINT           paise, CHECK > 0            ck_expenses_amount_positive
+  paid_by              UUID             FK -> users.id              INDEX ix_expenses_paid_by
+  split_strategy       VARCHAR(20)      as entered (decision 3)     ck_expenses_split_strategy_valid
+                                        CHECK IN ('equal', 'exact', 'percentage')
+  created_at           timestamptz      DEFAULT now()
+  updated_at           timestamptz NULL set on edit
+  deleted_at           timestamptz NULL soft delete: NULL = active (decision 9)
+  idempotency_key      UUID             the client's Idempotency-Key (decision 10)
+  request_fingerprint  VARCHAR(64)      SHA-256 hex of the canonical request
+  UNIQUE (group_id, idempotency_key)                                uq_expenses_group_id_idempotency_key
 
 expense_shares
-  expense_id      UUIDv7   FK -> expenses.id
-  user_id         UUIDv7   FK -> users.id
-  amount          BIGINT   (paise, calculated: what balances use)
-  input_value     NUMERIC(15,2) NULL  (as entered: a percent or exact paise; NULL for equal)
-  PK (expense_id, user_id)
+  expense_id           UUID             FK -> expenses.id ON DELETE CASCADE
+  user_id              UUID             FK -> users.id              INDEX ix_expense_shares_user_id
+  amount               BIGINT           paise, calculated: what     ck_expense_shares_amount_positive
+                                        balances use; CHECK > 0
+  input_value          NUMERIC(15,2) NULL  as entered: a percent    ck_expense_shares_input_value_positive
+                                        or exact paise; NULL for an equal split; CHECK > 0
+  PK (expense_id, user_id)                                          pk_expense_shares
 
 settlements
-  id              UUIDv7   PK
-  group_id        UUIDv7   FK -> groups.id
-  payer_id        UUIDv7   FK -> users.id
-  payee_id        UUIDv7   FK -> users.id
-  amount          BIGINT   (paise)
-  created_at      DATETIME
-  updated_at      DATETIME NULL   (set on edit)
-  deleted_at      DATETIME NULL   (soft delete: NULL = active)
-  idempotency_key UUID           (client's Idempotency-Key, decision 10)
-  request_fingerprint  string    (SHA-256 of the canonical request)
-  UNIQUE (group_id, idempotency_key)
+  id                   UUID (v7)        PK                          pk_settlements
+  group_id             UUID             FK -> groups.id             INDEX ix_settlements_group_id
+  payer_id             UUID             FK -> users.id              INDEX ix_settlements_payer_id
+  payee_id             UUID             FK -> users.id              INDEX ix_settlements_payee_id
+  amount               BIGINT           paise, CHECK > 0            ck_settlements_amount_positive
+  created_at           timestamptz      DEFAULT now()
+  updated_at           timestamptz NULL set on edit
+  deleted_at           timestamptz NULL soft delete: NULL = active
+  idempotency_key      UUID             (decision 10)
+  request_fingerprint  VARCHAR(64)
+  CHECK (payer_id <> payee_id)                                      ck_settlements_payer_not_payee
+  UNIQUE (group_id, idempotency_key)                                uq_settlements_group_id_idempotency_key
 
+There is no balances table: balances are always calculated (decision 2).
 
 RULES (enforced in application code)
   - For each expense, the expense_shares amounts must add up to expenses.amount.
@@ -179,8 +189,9 @@ DECISIONS
    Expenses, shares and settlements are the single source of truth.
    A balance is calculated as: paid - shares + settlements paid - settlements received.
    Stored balances could drift out of sync, and editing or deleting an expense would mean
-   rolling back balance updates by hand. The calculation is one SUM/GROUP BY query,
-   which is fast at this scale with indexes on the FK columns.
+   rolling back balance updates by hand. The calculation is a fixed number of SUM/GROUP BY
+   queries (4 for a group; 5 for a user across all their groups), fast at this scale with
+   indexes on the FK columns.
    If reads ever get slow, a cache or materialized view can be added later.
    Each balance use case reads from a single REPEATABLE READ snapshot, so its several
    queries can't see a concurrent write halfway through (nets always sum to 0).
@@ -194,8 +205,9 @@ DECISIONS
    An equal split with no list stores who was in the group at that moment, so a member
    who joins later doesn't change an old expense.
 
-4. The leftover paisa from an equal split goes to the payer.
+4. The leftover paisa from an equal or percentage split goes to the payer.
    e.g. 10000 / 3 = 3333 each with 1 left over, so the payer's share is 3334.
+   Percentage shares are rounded down to whole paise first, so the leftover is never negative.
    This rule is deterministic: the same input always gives the same split.
    If the payer isn't one of the people splitting, the leftover goes to the
    first participant, ordered by user id.
@@ -213,7 +225,8 @@ DECISIONS
                    Routers never touch the database or check business rules.
      app/services  One function per use case. Owns the database work and the business rules,
                    e.g. the group-membership rule lives once, in services/groups.py.
-     app/domain    Pure calculations with no database (the split maths), unit-tested directly.
+     app/domain    Pure calculations with no database (split maths, debt simplification),
+                   unit-tested directly.
    Services raise domain errors (app/errors.py) that know nothing about HTTP; one exception
    handler in main.py maps them to status codes (NotFound 404, RuleViolation 422, Conflict 409).
 
@@ -243,8 +256,10 @@ DECISIONS
    Settlements are independent of expenses (people settle a running balance, not a bill),
    so they are never changed by an edit or delete. If an edit or delete removes a debt that
    was already settled, the balance flips sign: the overpayment is now owed back.
-   Concurrent edits are last-write-wins. A production version would add a version column
-   (optimistic locking) and return 409 when the expense changed since the client read it.
+   Concurrent edits are last-write-wins. The production fix is optimistic locking: a version
+   column exposed as an ETag; edits send If-Match and get 412 Precondition Failed if someone
+   saved in between (428 Precondition Required if If-Match is missing). PATCH alone would only
+   protect concurrent edits to different fields, so edits stay PUT, pre-filled from GET.
    Settlements follow the same rules. A settlement edit is a plain update (no shares), and
    deleting a settlement brings back the debt it paid.
    Edits and deletes lock the row first (SELECT ... FOR UPDATE), so concurrent writes to the
@@ -330,6 +345,16 @@ DECISIONS
    keys stored on the row never expire, at a cost of a few bytes per row.
    Keys are scoped to a group (the collection the POST writes to). PUT and DELETE need no
    key: repeating them leaves the same state.
+
+11. Every list in a response has a defined order, so the same data always gives the same JSON.
+   Without an ORDER BY, Postgres returns rows in storage order, which changes when an edit
+   deletes and re-inserts share rows (a test caught exactly that).
+     expense shares and splits          by user_id
+     group members, group balances,     by name, then id
+       pairwise balances
+     a user's groups                    by group name, then id
+     expense and settlement lists       newest first (created_at DESC, id DESC)
+     simplified payments                biggest first, ties by user id
 ```
 
 ## 3. API
@@ -339,7 +364,9 @@ API DESIGN
 All amounts are integers in paise, from 1 to 10^12 (₹1000 crore). All IDs are UUIDs.
 POSTs that record money require an Idempotency-Key header (decision 10).
 The HTTP status code carries success or failure; response bodies hold only data.
-Errors return { "detail": "<reason>" }.
+Errors return { "detail": "<reason>" }; request-shape errors (Pydantic) return "detail" as a
+list of problems, each with its location. 400 missing Idempotency-Key, 404 not found,
+409 conflict, 422 invalid request or broken rule. Lists are ordered (decision 11).
 No auth: requests carry no caller identity. The users in a request (paid_by, payer_id,
 payee_id, splits) say who the money involves, not who is making the request.
 
@@ -356,8 +383,9 @@ POST /users
     id, phone_number, user_name
   }
   errors
-    409  phone_number already exists
-    422  user_name or phone_number blank
+    409  phone_number already exists (after stripping surrounding whitespace)
+    422  user_name blank or over 100 characters
+         phone_number not 7-15 digits with an optional leading +
 
 
 GROUPS
@@ -370,8 +398,9 @@ POST /groups
   response 201 {
     id, name
   }
+  Group names don't have to be unique.
   errors
-    422  name blank
+    422  name blank or over 100 characters
 
 POST /groups/{group_id}/members
   Add users to a group.
@@ -385,13 +414,14 @@ POST /groups/{group_id}/members
   is added once.
   errors
     404  group not found
-    404  any user_id does not exist
+    404  any user_id does not exist (nobody is added: all or nothing)
+    422  user_ids empty
 
 GET /groups/{group_id}
   A group and its members.
   response 200 {
     id, name
-    members   [ { user_id, user_name } ]
+    members   [ { user_id, user_name } ]   <- ordered by name
   }
   errors
     404  group not found
@@ -454,7 +484,8 @@ GET /groups/{group_id}/expenses/{expense_id}
     404  expense not found, deleted, or in a different group
 
 PUT /groups/{group_id}/expenses/{expense_id}
-  Replace an expense: same request as POST (see decision 9 for why not PATCH).
+  Replace an expense: same request as POST, pre-filled by the client from GET
+  (split_strategy and splits come back as entered; see decision 9 for why not PATCH).
   Deletes the old shares and recalculates them in one DB transaction; sets updated_at.
   Concurrent edits: last write wins.
   response 200   same shape as POST
@@ -533,7 +564,7 @@ GET /groups/{group_id}/balances
   Each member's net balance in the group.
   Positive = is owed money, negative = owes money. All nets sum to 0.
   response 200 {
-    balances   [ { user_id, user_name, net } ]
+    balances   [ { user_id, user_name, net } ]   <- ordered by name
   }
   errors
     404  group not found
@@ -543,7 +574,7 @@ GET /groups/{group_id}/balances/{user_id}
   response 200 {
     user_id
     net
-    balances   [ { user_id, user_name, amount } ]   <- positive = they owe you
+    balances   [ { user_id, user_name, amount } ]   <- positive = they owe you; ordered by name
   }
   errors
     404  group or user not found
@@ -555,12 +586,12 @@ GET /users/{user_id}/balances
   response 200 {
     user_id
     total_net
-    groups   [ { group_id, group_name, net } ]
+    groups   [ { group_id, group_name, net } ]   <- ordered by group name
   }
   errors
     404  user not found
 
-GET /groups/{group_id}/simplified-debts               [STRETCH]
+GET /groups/{group_id}/simplified-debts
   Debt simplification: the payments that would settle everyone in the group.
   Calculated from net balances (greedy: biggest debtor pays biggest creditor;
   see decision 8). At most (members - 1) payments, biggest first.
@@ -602,7 +633,8 @@ tests/integration/                 Real Postgres, through the API unless noted
   test_database_constraints.py     CHECK/UNIQUE/PK/FK rules written directly, bypassing the API
   test_snapshot.py                 Forces a write between two balance queries; the result must be
                                    the state before it. A control test proves the write lands.
-  test_idempotency.py              Idempotency-Key: replays, equivalent bodies, 422/409 cases
+  test_idempotency.py              Idempotency-Key: missing is 400, replays, equivalent bodies,
+                                   422/409 cases
   test_concurrency.py              Parallel threads, one connection each: row locks on edit/delete,
                                    idempotent member adds, one winner for a duplicate phone,
                                    simultaneous retries with one Idempotency-Key
@@ -610,6 +642,6 @@ tests/integration/                 Real Postgres, through the API unless noted
                                    API is compared with a model and an independent balance oracle
 ```
 
-The concurrency, snapshot, ordering and idempotency tests were each checked by removing the
-code they protect (the row lock, the snapshot, the share ordering, the idempotency UNIQUE
-constraint) and confirming that they fail.
+The important tests were each checked by removing the code they protect and confirming that
+they fail: the row lock, the snapshot, the share ordering, the idempotency UNIQUE constraint,
+the amount cap, and the soft-delete filter on a single balance query.

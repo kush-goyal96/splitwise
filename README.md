@@ -295,6 +295,7 @@ These hold even if application code has a bug, and each one has a test that writ
 | Rule | Constraint |
 |---|---|
 | Money is positive | `ck_expenses_amount_positive`, `ck_expense_shares_amount_positive`, `ck_settlements_amount_positive` |
+| The split as entered is valid | `ck_expenses_split_strategy_valid` (one of the three strategies), `ck_expense_shares_input_value_positive` |
 | You can't pay yourself | `ck_settlements_payer_not_payee` |
 | One account per phone number | `uq_users_phone_number` |
 | A user is in a group once | `pk_group_members (group_id, user_id)` |
@@ -302,9 +303,9 @@ These hold even if application code has a bug, and each one has a test that writ
 | References exist | foreign keys on every `*_id` column |
 | Shares never outlive their expense | `expense_shares.expense_id … ON DELETE CASCADE` |
 | A retry key creates at most one row per group | `uq_expenses_group_id_idempotency_key`, `uq_settlements_group_id_idempotency_key` |
-| A retry key is always stored with its fingerprint | `ck_expenses_idempotency_complete`, `ck_settlements_idempotency_complete` |
+| Every expense and settlement has a retry key | `idempotency_key` and `request_fingerprint` are `NOT NULL` |
 
-Constraint names come from a **naming convention** (`models.py`), so they are predictable. Two features depend on this: the duplicate-phone check (409) and concurrent idempotent retries both identify the violated constraint by name.
+Constraint names come from a **naming convention** (`models.py`), so they are predictable. Two features depend on this: the duplicate-phone check (409) and concurrent idempotent retries both identify the violated constraint by name. Every column, type, constraint and index is listed in [DESIGN.md §2](DESIGN.md#tables-rules-and-decisions).
 
 ### Rules enforced by the application
 
@@ -498,7 +499,7 @@ Full client contract and edge cases: [DESIGN.md decision 10](DESIGN.md#tables-ru
 | **Soft delete** | Hard delete | Audit trail, undo | Every query must filter (enforced by one shared expression + tests) |
 | **Store the split as entered, edit with PUT** | Store only the calculated shares | The edit screen can show the original split (percentages can't be recovered from paise) | Two extra columns; PATCH is possible but not built yet |
 | **Idempotency key required, stored on the row** | Optional key; or a separate idempotency table storing whole responses | First-party backend recording money, so safe retries are part of the contract. Same transaction as the row, so they can't disagree; no expiry or cleanup job | Every client must send a key; keys never expire |
-| **Last write wins on concurrent edits** | Optimistic locking (`version` column → 409) | No auth and no client to resolve conflicts yet | A lost update is possible (documented) |
+| **Last write wins on concurrent edits** | Optimistic locking (`ETag` / `If-Match` → 412); or PATCH | No client yet to resolve conflicts; PATCH would only protect edits to *different* fields | A lost update is possible (documented) |
 | **Greedy debt simplification** | An exact minimum | Exact is NP-hard; greedy is ≤ n − 1 and O(n log n) | Occasionally one more payment than optimal |
 | **`create_all` on startup** | Alembic migrations | Fewer moving parts for a project with no deployed data | A model change needs `docker compose down -v` |
 | **No auth: requests carry no caller identity** | JWT or sessions | The brief is the splitting logic | Any client can read or change any group, and changes aren't attributed to anyone (see §13) |
@@ -589,7 +590,7 @@ What is deliberately out of scope, and what a production version would add:
 |---|---|---|
 | **Auth** | None: requests carry no caller identity. `paid_by` and `payer_id` describe the transaction, not who sent it. | JWT or OAuth identifies the caller; only group members can read or write a group; `created_by` / `updated_by` record *who* made each change |
 | **Schema changes** | `create_all` on startup | **Alembic** migrations, run as a deploy step |
-| **Concurrent edits** | Last write wins (writes are serialized, so nothing is corrupted) | Optimistic locking: a `version` column, `If-Match`, 409 on conflict |
+| **Concurrent edits** | Last write wins (writes are serialized, so nothing is corrupted) | Optimistic locking: a version exposed as an `ETag`; edits send `If-Match`, 412 if stale, 428 if missing |
 | **Edit history** | Edits overwrite; deletes are soft | An `expense_revisions` table, or an append-only event log |
 | **Lists** | Not paginated | Cursor pagination on `(created_at, id)`, cheap because ids are UUIDv7 |
 | **Read performance** | Calculated on every request | Partial indexes `WHERE deleted_at IS NULL`; a cached or materialized balance view if reads dominate |
