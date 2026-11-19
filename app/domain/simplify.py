@@ -53,6 +53,8 @@ def simplify_debts(nets: Mapping[uuid.UUID, int]) -> list[Transfer]:
         if due > amount:
             heapq.heappush(creditors, (-(due - amount), creditor))
 
-    # The nets sum to 0, so debtors and creditors always run out together.
-    assert not debtors and not creditors
+    # The nets sum to 0, so debtors and creditors always run out together. An explicit check,
+    # not assert, so it still runs under `python -O`.
+    if debtors or creditors:
+        raise RuntimeError("debt simplification left unsettled balances")
     return transfers

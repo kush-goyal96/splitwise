@@ -58,9 +58,12 @@ def calculate_shares(
     if any(share <= 0 for share in shares.values()):
         raise SplitError("amount is too small: every participant's share must be at least 1 paisa")
 
-    # Invariant from DESIGN.md: shares add up to the expense amount. If this
-    # fails, the bug is in this module, not in the request.
-    assert sum(shares.values()) == amount, "shares do not add up to the amount"
+    # Invariant from DESIGN.md: shares add up to the expense amount. If this fails, the bug
+    # is in this module, not in the request, so it's a 500, never a 422. An explicit check,
+    # not assert: `python -O` strips asserts, and this one guards money.
+    total = sum(shares.values())
+    if total != amount:
+        raise RuntimeError(f"shares add up to {total}, not the expense amount {amount}")
     return shares
 
 

@@ -12,6 +12,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
+from app.domain import splits as splits_module
 from app.domain.splits import SplitError, SplitStrategy, calculate_shares
 from app.errors import RuleViolationError
 
@@ -196,3 +197,12 @@ def test_percentage_split_properties(amount, parts, payer, data):
     result = split(amount, PERCENTAGE, entries, payer=payer)
     assert result == expected
     assert sum(result.values()) == amount
+
+
+def test_a_broken_calculation_is_an_internal_error_not_a_422(monkeypatch):
+    # The "shares add up to the amount" invariant is an explicit check (not an assert, which
+    # `python -O` strips). If the maths ever broke, it must fail loudly as a bug (500),
+    # never be reported to the client as a bad request (SplitError, 422).
+    monkeypatch.setattr(splits_module, "_equal", lambda amount, participants, payer: {A: 1})
+    with pytest.raises(RuntimeError, match="shares add up to 1, not the expense amount 100"):
+        split(100, EQUAL, [(A, None)])
