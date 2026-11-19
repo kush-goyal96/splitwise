@@ -565,14 +565,14 @@ Full request and response bodies, and every error case, are in **[DESIGN.md §3]
 ## 12. Testing
 
 ```bash
-docker compose run --rm --build test                        # all 164 tests, ~1 min
+docker compose run --rm --build test                        # all 171 tests, ~1 min
 docker compose run --rm --build test pytest tests/unit -v   # any pytest arguments
 ```
 
 | Layer | Tests | Approach |
 |---|---|---|
-| **Unit**: split maths, debt simplification | 35 | One example per rule, plus **Hypothesis property tests**: thousands of generated inputs compared against an independent integer-only calculation |
-| **API**: every endpoint | 82 | Happy paths, the worked example by hand, and one case per kind of error (each rejected request is also checked to have **saved nothing**) |
+| **Unit**: split maths, debt simplification | 36 | One example per rule, plus **Hypothesis property tests**: thousands of generated inputs compared against an independent integer-only calculation |
+| **API**: every endpoint | 88 | Happy paths, the worked example by hand, and one case per kind of error (each rejected request is also checked to have **saved nothing**) |
 | **Idempotency keys** | 13 | Missing key is 400, replays, equivalent bodies (reordered splits, `"50"` vs `"50.00"`), the 409/422 cases, scoping, failed requests not remembered |
 | **Database constraints** | 14 | Invalid rows written directly, bypassing the API; asserts the constraint *name* |
 | **Snapshot isolation** | 8 | Forces a write between two balance queries; the result must be the state before it. A control test proves the write really lands. |
@@ -616,6 +616,7 @@ What is deliberately out of scope, and what a production version would add:
 | **Lists** | Not paginated | Cursor pagination on `(created_at, id)`, cheap because ids are UUIDv7 |
 | **Read performance** | Calculated on every request | Partial indexes `WHERE deleted_at IS NULL`; a cached or materialized balance view if reads dominate |
 | **Balance queries** | A few `SUM` queries per use case, each applying the soft-delete filter | One ledger subquery (signed entries per person and counterparty) that all balance views read, so the filter lives in one place |
+| **Transaction boundary** | Each service use case commits its own transaction | Commit once per request (a unit of work), so an audit-log entry and the change it records always commit together |
 | **Membership rule** | Checked in application code | Also enforced by the database: composite foreign keys from expenses, shares and settlements to `group_members` |
 | **Money** | One currency (INR) | A currency column per group or expense; conversion at a recorded rate |
 | **Expenses** | One payer | Multiple payers: a `payments` table mirroring `expense_shares` |

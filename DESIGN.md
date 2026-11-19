@@ -229,7 +229,12 @@ DECISIONS
      app/domain    Pure calculations with no database (split maths, debt simplification),
                    unit-tested directly.
    Services raise domain errors (app/errors.py) that know nothing about HTTP; one exception
-   handler in main.py maps them to status codes (NotFound 404, RuleViolation 422, Conflict 409).
+   handler in main.py maps them to status codes (NotFound 404, RuleViolation 422, Conflict 409);
+   an unmapped subclass is a programming error and returns a plain 500.
+   Each service use case commits its own transaction. That's enough while every write is one
+   change; once an audit log must be written in the same transaction as each change (future
+   scope, decision 9), the commit moves up to the request boundary (a unit of work), so the
+   change and its log entry commit together.
 
 8. Debt simplification is greedy and works only from net balances.
    Repeatedly, the biggest debtor pays the biggest creditor as much as they can
@@ -349,6 +354,10 @@ DECISIONS
    as the row, so the two can never disagree. A separate idempotency table storing whole
    responses (Stripe's approach) generalises to any endpoint, but needs expiry and cleanup;
    keys stored on the row never expire, at a cost of a few bytes per row.
+   A retry must resend the same request. An equal split with no list ("everyone") and the same
+   split listing every member are different requests and fingerprint differently, on purpose:
+   who "everyone" is can change between attempts, and a fingerprint may depend only on the
+   request, never on data that changes.
    Keys are scoped to a group (the collection the POST writes to). PUT and DELETE need no
    key: repeating them leaves the same state.
 
@@ -456,6 +465,9 @@ POST /groups/{group_id}/expenses
       equal        -> no value; just list the user_ids
       exact        -> amount this user owes, in paise
       percentage   -> percent this user owes
+    One "value" field for every strategy, deliberately: the request keeps one shape, and
+    split_strategy says how to read the value. Exact values must be whole paise (2500.5 is
+    a 422); percentages may have 2 decimals.
     If split_strategy is "equal" and splits is empty or omitted,
     the expense is split equally between all group members.
   response 201 {
