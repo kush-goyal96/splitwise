@@ -97,6 +97,7 @@ class ExpenseCreate(BaseModel):
     splits: list[SplitEntry] = Field(default_factory=list)
 
 
+
 class ShareRead(ORMModel):
     user_id: uuid.UUID
     amount: int
@@ -108,6 +109,7 @@ class ExpenseRead(ORMModel):
     amount: int
     paid_by: uuid.UUID
     created_at: datetime
+    updated_at: datetime | None
     shares: list[ShareRead]
 
 

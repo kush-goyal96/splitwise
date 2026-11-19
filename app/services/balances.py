@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from app.database import use_snapshot
 from app.domain.simplify import Transfer, simplify_debts
 from app.errors import RuleViolationError
-from app.models import Expense, ExpenseShare, Group, GroupMember, Settlement, User
+from app.models import ACTIVE_EXPENSE, Expense, ExpenseShare, Group, GroupMember, Settlement, User
 from app.services.groups import get_group
 from app.services.users import get_user
 
@@ -114,14 +114,14 @@ def _group_nets(db: Session, group_id: uuid.UUID, member_ids: list[uuid.UUID]) -
     paid = _totals(
         db,
         select(Expense.paid_by, func.sum(Expense.amount))
-        .where(Expense.group_id == group_id)
+        .where(Expense.group_id == group_id, ACTIVE_EXPENSE)
         .group_by(Expense.paid_by),
     )
     shares = _totals(
         db,
         select(ExpenseShare.user_id, func.sum(ExpenseShare.amount))
         .join(Expense, Expense.id == ExpenseShare.expense_id)
-        .where(Expense.group_id == group_id)
+        .where(Expense.group_id == group_id, ACTIVE_EXPENSE)
         .group_by(ExpenseShare.user_id),
     )
     settled_out = _totals(
@@ -163,6 +163,7 @@ def _pairwise(
         .join(Expense, Expense.id == ExpenseShare.expense_id)
         .where(
             Expense.group_id == group_id,
+            ACTIVE_EXPENSE,
             Expense.paid_by == user_id,
             ExpenseShare.user_id != user_id,
         )
@@ -175,6 +176,7 @@ def _pairwise(
         .join(Expense, Expense.id == ExpenseShare.expense_id)
         .where(
             Expense.group_id == group_id,
+            ACTIVE_EXPENSE,
             ExpenseShare.user_id == user_id,
             Expense.paid_by != user_id,
         )
@@ -222,14 +224,14 @@ def _user_group_nets(db: Session, user_id: uuid.UUID) -> list[tuple[uuid.UUID, s
     paid = _totals(
         db,
         select(Expense.group_id, func.sum(Expense.amount))
-        .where(Expense.paid_by == user_id)
+        .where(Expense.paid_by == user_id, ACTIVE_EXPENSE)
         .group_by(Expense.group_id),
     )
     shares = _totals(
         db,
         select(Expense.group_id, func.sum(ExpenseShare.amount))
         .join(Expense, Expense.id == ExpenseShare.expense_id)
-        .where(ExpenseShare.user_id == user_id)
+        .where(ExpenseShare.user_id == user_id, ACTIVE_EXPENSE)
         .group_by(Expense.group_id),
     )
     settled_out = _totals(

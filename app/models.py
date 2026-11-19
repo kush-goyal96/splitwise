@@ -77,11 +77,20 @@ class Expense(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+    # NULL until the expense is first edited.
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Soft delete: NULL = active. Deleted expenses (and their shares) stay for the audit trail.
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
-    # Saving an Expense saves its shares too; deleting it deletes them.
+    # Saving an Expense saves its shares too; removing a share from the list deletes it
+    # (used when an edit replaces the shares).
     shares: Mapped[list["ExpenseShare"]] = relationship(
         back_populates="expense", cascade="all, delete-orphan"
     )
+
+
+# Every query that reads expenses, or sums their shares, must include this filter.
+ACTIVE_EXPENSE = Expense.deleted_at.is_(None)
 
 
 class ExpenseShare(Base):

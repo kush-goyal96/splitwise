@@ -23,6 +23,33 @@ def create_expense(group_id: uuid.UUID, payload: ExpenseCreate, db: DbSession) -
     )
 
 
+@router.get("/{expense_id}", response_model=ExpenseRead)
+def get_expense(group_id: uuid.UUID, expense_id: uuid.UUID, db: DbSession) -> Expense:
+    return service.get_expense(db, group_id, expense_id)
+
+
+@router.put("/{expense_id}", response_model=ExpenseRead)
+def update_expense(
+    group_id: uuid.UUID, expense_id: uuid.UUID, payload: ExpenseCreate, db: DbSession
+) -> Expense:
+    # Full replacement: same body as POST, shares are recalculated from scratch.
+    return service.update_expense(
+        db,
+        group_id,
+        expense_id,
+        name=payload.name,
+        amount=payload.amount,
+        paid_by=payload.paid_by,
+        strategy=payload.split_strategy,
+        splits=[(entry.user_id, entry.value) for entry in payload.splits],
+    )
+
+
+@router.delete("/{expense_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_expense(group_id: uuid.UUID, expense_id: uuid.UUID, db: DbSession) -> None:
+    service.delete_expense(db, group_id, expense_id)
+
+
 @router.get("", response_model=ExpenseList)
 def list_expenses(group_id: uuid.UUID, db: DbSession) -> ExpenseList:
     expenses = service.list_expenses(db, group_id)
