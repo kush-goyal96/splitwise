@@ -591,7 +591,7 @@ What is deliberately out of scope, and what a production version would add:
 | **Auth** | None: requests carry no caller identity. `paid_by` and `payer_id` describe the transaction, not who sent it. | JWT or OAuth identifies the caller; only group members can read or write a group; `created_by` / `updated_by` record *who* made each change |
 | **Schema changes** | `create_all` on startup | **Alembic** migrations, run as a deploy step |
 | **Concurrent edits** | Last write wins (writes are serialized, so nothing is corrupted) | Optimistic locking: a version exposed as an `ETag`; edits send `If-Match`, 412 if stale, 428 if missing |
-| **Edit history** | Edits overwrite; deletes are soft | An `expense_revisions` table, or an append-only event log |
+| **Edit history and undo** | Edits overwrite; deletes are soft | An append-only `audit_log` (entity, action, `actor_id`, `before` / `after` JSONB snapshots incl. shares, timestamp), written **in the same transaction** as each create, update and delete. It powers an activity feed and undo, where undo is itself a new logged operation, never a rewrite of the log. Undo can be limited to a 30-day window, but the log itself is kept long-term (money disputes need it), with monthly partitions so old data can be archived cheaply. Needs auth first, so `actor_id` can record *who*. |
 | **Lists** | Not paginated | Cursor pagination on `(created_at, id)`, cheap because ids are UUIDv7 |
 | **Read performance** | Calculated on every request | Partial indexes `WHERE deleted_at IS NULL`; a cached or materialized balance view if reads dominate |
 | **Money** | One currency (INR) | A currency column per group or expense; conversion at a recorded rate |

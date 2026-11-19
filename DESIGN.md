@@ -27,6 +27,7 @@ The service works out who owes whom, in each group and across all of a user's gr
 - The split stored as entered, so an edit form can be pre-filled
 
 **Out of scope** (future work)
+- An audit log of every create, update and delete, for an activity feed and undo (decision 9)
 - Authentication and authorization: requests carry no caller identity. Fields like paid_by
   and payer_id describe the transaction, not who sent the request, so any client can act
   on any group and changes aren't attributed to anyone
@@ -252,7 +253,12 @@ DECISIONS
    inputs a GET returns (decision 3). Because the inputs are stored, a PATCH that changes
    only the amount could recalculate the shares from them; it isn't built yet.
    The old shares are deleted and the new ones inserted in one transaction.
-   Edits overwrite the old values; keeping every version would need a revisions table.
+   Edits overwrite the old values. Future scope: an append-only audit_log (entity, action,
+   actor_id, before/after JSONB snapshots, timestamp), written in the same transaction as
+   each change. It gives an activity feed and undo (undo is a new logged operation, never a
+   rewrite of the log). Undo may be limited to 30 days, but the log is kept long-term for
+   disputes, partitioned by month so old data can be archived. It needs auth first, so
+   actor_id can record who made each change.
    Settlements are independent of expenses (people settle a running balance, not a bill),
    so they are never changed by an edit or delete. If an edit or delete removes a debt that
    was already settled, the balance flips sign: the overpayment is now owed back.
