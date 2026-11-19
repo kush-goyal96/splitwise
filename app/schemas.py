@@ -2,16 +2,17 @@
 
 These validate the *shape* of each request (types, blanks, positive numbers).
 Rules that need the database or the whole request (members of the group,
-shares adding up, percentages totalling 100) live in app/services.
+shares adding up, percentages totalling 100) live in app/services and app/domain.
 """
 
 import uuid
 from datetime import datetime
 from decimal import Decimal
-from enum import Enum
 from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, PositiveInt, StringConstraints, model_validator
+
+from app.domain.splits import SplitStrategy
 
 # ---------- Reusable field types ----------
 
@@ -77,12 +78,6 @@ class MembersRead(BaseModel):
 
 
 # ---------- Expenses ----------
-
-
-class SplitStrategy(str, Enum):
-    EQUAL = "equal"
-    EXACT = "exact"
-    PERCENTAGE = "percentage"
 
 
 class SplitEntry(BaseModel):

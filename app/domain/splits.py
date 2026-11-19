@@ -1,8 +1,9 @@
 """Split calculation: turns an expense request into exact per-person shares.
 
-Pure logic: no database, no FastAPI. Numbers in, numbers out, so it can be
-unit-tested directly. The router loads the group's members, calls
-calculate_shares, and turns a SplitError into a 422.
+Pure domain logic: no database, no FastAPI. Numbers in, numbers out, so it can
+be unit-tested directly. Group rules (who is a member) are checked by the
+expenses service before this is called; this module only does the maths and
+the rules about the split itself.
 
 All amounts are integer paise. Percentages are Decimal; floats are never used.
 """
@@ -10,14 +11,21 @@ All amounts are integer paise. Percentages are Decimal; floats are never used.
 import uuid
 from collections.abc import Sequence
 from decimal import ROUND_FLOOR, Decimal
+from enum import Enum
 
-from app.schemas import SplitStrategy
+from app.errors import RuleViolationError
 
 HUNDRED = Decimal(100)
 
 
-class SplitError(ValueError):
-    """The request breaks a splitting rule. The message is safe to show to the client."""
+class SplitStrategy(str, Enum):
+    EQUAL = "equal"
+    EXACT = "exact"
+    PERCENTAGE = "percentage"
+
+
+class SplitError(RuleViolationError):
+    """The request breaks a splitting rule."""
 
 
 def calculate_shares(
@@ -25,7 +33,7 @@ def calculate_shares(
     strategy: SplitStrategy,
     splits: Sequence[tuple[uuid.UUID, Decimal | None]],
     payer_id: uuid.UUID,
-    member_ids: set[uuid.UUID],
+    all_members: set[uuid.UUID],
 ) -> dict[uuid.UUID, int]:
     """Return {user_id: paise owed}. The shares always add up to `amount`.
 
@@ -33,12 +41,11 @@ def calculate_shares(
       equal      -> None
       exact      -> paise owed (a whole number)
       percentage -> percent owed (e.g. Decimal("33.33"))
-    An empty `splits` is only allowed for an equal split, and means "all group members".
+    An empty `splits` is only allowed for an equal split, and means "split
+    between all_members". The caller has already checked that the payer and
+    every listed user are members.
     """
-    if payer_id not in member_ids:
-        raise SplitError("paid_by must be a member of the group")
-
-    participants = _participants(strategy, splits, member_ids)
+    participants = _participants(strategy, splits, all_members)
     values = dict(splits)
 
     if strategy is SplitStrategy.EQUAL:
@@ -60,24 +67,19 @@ def calculate_shares(
 def _participants(
     strategy: SplitStrategy,
     splits: Sequence[tuple[uuid.UUID, Decimal | None]],
-    member_ids: set[uuid.UUID],
+    all_members: set[uuid.UUID],
 ) -> list[uuid.UUID]:
     """Work out who is splitting, and validate the list and its values."""
     if not splits:
         if strategy is not SplitStrategy.EQUAL:
             raise SplitError(f"splits are required for {strategy.value} splits")
         # Decision 5: no participants listed = all members. Sorted, so the order is deterministic.
-        return sorted(member_ids)
+        return sorted(all_members)
 
     participants = [user_id for user_id, _ in splits]
 
     if len(set(participants)) != len(participants):
         raise SplitError("a user appears more than once in splits")
-
-    outsiders = set(participants) - member_ids
-    if outsiders:
-        ids = ", ".join(sorted(str(u) for u in outsiders))
-        raise SplitError(f"not members of the group: {ids}")
 
     has_value = [value is not None for _, value in splits]
     if strategy is SplitStrategy.EQUAL and any(has_value):

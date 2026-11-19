@@ -157,6 +157,8 @@ DECISIONS
    rolling back balance updates by hand. The calculation is one SUM/GROUP BY query,
    which is fast at this scale with indexes on the FK columns.
    If reads ever get slow, a cache or materialized view can be added later.
+   Each balance use case reads from a single REPEATABLE READ snapshot, so its several
+   queries can't see a concurrent write halfway through (nets always sum to 0).
 
 3. Every share is stored explicitly, including for equal splits.
    An equal split of ₹100 between 3 people becomes 3 expense_shares rows.
@@ -175,6 +177,15 @@ DECISIONS
 6. Tables are created with Base.metadata.create_all on app startup, not with migrations.
    create_all only creates missing tables; it never alters existing ones, so a model change needs a fresh database (docker compose down -v).
    A production version would use Alembic migrations so the schema can evolve without data loss.
+
+7. Code is split into three layers, each with one job:
+     app/routers   HTTP only: parse the request, call one service function, shape the response.
+                   Routers never touch the database or check business rules.
+     app/services  One function per use case. Owns the database work and the business rules,
+                   e.g. the group-membership rule lives once, in services/groups.py.
+     app/domain    Pure calculations with no database (the split maths), unit-tested directly.
+   Services raise domain errors (app/errors.py) that know nothing about HTTP; one exception
+   handler in main.py maps them to status codes (NotFound 404, RuleViolation 422, Conflict 409).
 ```
 
 ## 3. API
