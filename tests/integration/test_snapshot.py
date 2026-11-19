@@ -77,6 +77,30 @@ def test_user_balances_read_one_snapshot(api, trip, db, some_activity, write_dur
     assert api.user_balances(trip.kush)["groups"] != before
 
 
+def test_pairwise_reads_one_snapshot(api, trip, db, some_activity, write_during_read):
+    # Shivanshu, not Kush: the concurrent write is paid by Kush, and Kush's own pairwise view
+    # only sees it in the first query, which has already run, so it would pass without a snapshot.
+    before = api.pairwise(trip.group, trip.shivanshu)
+    state = write_during_read()
+
+    rows = balances_service.user_balance_in_group(db, uuid.UUID(trip.group), uuid.UUID(trip.shivanshu))
+
+    assert state["written"]
+    assert {str(row.user_id): row.amount for row in rows} == before
+    assert api.pairwise(trip.group, trip.shivanshu) != before
+
+
+def test_simplified_debts_read_one_snapshot(api, trip, db, some_activity, write_during_read):
+    before = api.payments(trip.group)
+    state = write_during_read()
+
+    transfers = balances_service.simplified_debts(db, uuid.UUID(trip.group))
+
+    assert state["written"]
+    assert [(str(t.from_user_id), str(t.to_user_id), t.amount) for t in transfers] == before
+    assert api.payments(trip.group) != before
+
+
 def test_control_without_the_snapshot_the_write_is_half_counted(
     api, trip, db, some_activity, write_during_read, monkeypatch
 ):

@@ -564,7 +564,7 @@ Full request and response bodies, and every error case, are in **[DESIGN.md §3]
 ## 12. Testing
 
 ```bash
-docker compose run --rm --build test                        # all 162 tests, ~1 min
+docker compose run --rm --build test                        # all 164 tests, ~1 min
 docker compose run --rm --build test pytest tests/unit -v   # any pytest arguments
 ```
 
@@ -574,7 +574,7 @@ docker compose run --rm --build test pytest tests/unit -v   # any pytest argumen
 | **API**: every endpoint | 82 | Happy paths, the worked example by hand, and one case per kind of error (each rejected request is also checked to have **saved nothing**) |
 | **Idempotency keys** | 13 | Missing key is 400, replays, equivalent bodies (reordered splits, `"50"` vs `"50.00"`), the 409/422 cases, scoping, failed requests not remembered |
 | **Database constraints** | 14 | Invalid rows written directly, bypassing the API; asserts the constraint *name* |
-| **Snapshot isolation** | 6 | Forces a write between two balance queries; the result must be the state before it. A control test proves the write really lands. |
+| **Snapshot isolation** | 8 | Forces a write between two balance queries; the result must be the state before it. A control test proves the write really lands. |
 | **Concurrency** | 8 | Real parallel connections: racing edits, edit vs delete, double deletes, duplicate signups, member adds, simultaneous retries with one key |
 | **Randomised invariants** | 4 seeds × 80 operations | Random expenses, edits, deletes, settlements and late retries across two overlapping groups; **after every step**, compared with a model and an independent balance oracle |
 
@@ -583,7 +583,7 @@ docker compose run --rm --build test pytest tests/unit -v   # any pytest argumen
 | Protection removed | Tests that fail |
 |---|---|
 | Row lock (`FOR UPDATE`) | 2 concurrency tests |
-| Snapshot (`use_snapshot`) | 2 snapshot tests |
+| Snapshot (`use_snapshot`), from each balance endpoint in turn | 1 snapshot test per endpoint (4) |
 | Ordering of shares | 4 tests, including the randomised invariants |
 | The idempotency `UNIQUE` constraint | 3 tests (2 concurrency, 1 constraint) |
 | The amount cap | 4 tests |
