@@ -6,3 +6,7 @@ __pycache__/
 
 # Personal dev notes and request samples
 /dev/
+
+# Test caches
+.pytest_cache/
+.hypothesis/
