@@ -124,3 +124,11 @@ class Settlement(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+    # NULL until the settlement is first edited.
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Soft delete: NULL = active.
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+# Every query that reads settlements must include this filter.
+ACTIVE_SETTLEMENT = Settlement.deleted_at.is_(None)

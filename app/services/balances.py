@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from app.database import use_snapshot
 from app.domain.simplify import Transfer, simplify_debts
 from app.errors import RuleViolationError
-from app.models import ACTIVE_EXPENSE, Expense, ExpenseShare, Group, GroupMember, Settlement, User
+from app.models import ACTIVE_EXPENSE, ACTIVE_SETTLEMENT, Expense, ExpenseShare, Group, GroupMember, Settlement, User
 from app.services.groups import get_group
 from app.services.users import get_user
 
@@ -127,13 +127,13 @@ def _group_nets(db: Session, group_id: uuid.UUID, member_ids: list[uuid.UUID]) -
     settled_out = _totals(
         db,
         select(Settlement.payer_id, func.sum(Settlement.amount))
-        .where(Settlement.group_id == group_id)
+        .where(Settlement.group_id == group_id, ACTIVE_SETTLEMENT)
         .group_by(Settlement.payer_id),
     )
     settled_in = _totals(
         db,
         select(Settlement.payee_id, func.sum(Settlement.amount))
-        .where(Settlement.group_id == group_id)
+        .where(Settlement.group_id == group_id, ACTIVE_SETTLEMENT)
         .group_by(Settlement.payee_id),
     )
 
@@ -186,14 +186,14 @@ def _pairwise(
     paid_to = _totals(
         db,
         select(Settlement.payee_id, func.sum(Settlement.amount))
-        .where(Settlement.group_id == group_id, Settlement.payer_id == user_id)
+        .where(Settlement.group_id == group_id, Settlement.payer_id == user_id, ACTIVE_SETTLEMENT)
         .group_by(Settlement.payee_id),
     )
     # ...and money someone paid the user reduces what they owe the user (balance goes down).
     received_from = _totals(
         db,
         select(Settlement.payer_id, func.sum(Settlement.amount))
-        .where(Settlement.group_id == group_id, Settlement.payee_id == user_id)
+        .where(Settlement.group_id == group_id, Settlement.payee_id == user_id, ACTIVE_SETTLEMENT)
         .group_by(Settlement.payer_id),
     )
 
@@ -237,13 +237,13 @@ def _user_group_nets(db: Session, user_id: uuid.UUID) -> list[tuple[uuid.UUID, s
     settled_out = _totals(
         db,
         select(Settlement.group_id, func.sum(Settlement.amount))
-        .where(Settlement.payer_id == user_id)
+        .where(Settlement.payer_id == user_id, ACTIVE_SETTLEMENT)
         .group_by(Settlement.group_id),
     )
     settled_in = _totals(
         db,
         select(Settlement.group_id, func.sum(Settlement.amount))
-        .where(Settlement.payee_id == user_id)
+        .where(Settlement.payee_id == user_id, ACTIVE_SETTLEMENT)
         .group_by(Settlement.group_id),
     )
 

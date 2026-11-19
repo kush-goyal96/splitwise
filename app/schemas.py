@@ -138,6 +138,11 @@ class SettlementRead(ORMModel):
     payee_id: uuid.UUID
     amount: int
     created_at: datetime
+    updated_at: datetime | None
+
+
+class SettlementList(BaseModel):
+    settlements: list[SettlementRead]
 
 
 # ---------- Balances ----------
