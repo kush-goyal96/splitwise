@@ -21,11 +21,13 @@ The service works out who owes whom, in each group and across all of a user's gr
 - Input validation and tests for the splitting and balance logic
 
 **Stretch** (built only after the core, tests and README are done)
-1. Editing and deleting expenses
+1. Editing and deleting expenses and settlements
 2. Debt simplification: the fewest payments needed to settle a group
 
 **Out of scope** (future work)
-- Authentication: the acting user is passed explicitly in requests
+- Authentication and authorization: requests carry no caller identity. Fields like paid_by
+  and payer_id describe the transaction, not who sent the request, so any client can act
+  on any group and changes aren't attributed to anyone
 - Frontend
 - Expenses with more than one payer
 - Multiple currencies
@@ -62,6 +64,10 @@ erDiagram
         BIGINT amount "paise"
         UUID paid_by FK
         DATETIME created_at
+        DATETIME updated_at "nullable"
+        DATETIME deleted_at "nullable, soft delete"
+        UUID idempotency_key "nullable"
+        string request_fingerprint "nullable"
     }
 
     expense_shares {
@@ -77,6 +83,10 @@ erDiagram
         UUID payee_id FK
         BIGINT amount "paise"
         DATETIME created_at
+        DATETIME updated_at "nullable"
+        DATETIME deleted_at "nullable, soft delete"
+        UUID idempotency_key "nullable"
+        string request_fingerprint "nullable"
     }
 
     users ||--o{ group_members : joins
@@ -120,6 +130,11 @@ expenses
   amount          BIGINT   (paise)
   paid_by         UUIDv7   FK -> users.id
   created_at      DATETIME
+  updated_at      DATETIME NULL   (set on edit)
+  deleted_at      DATETIME NULL   (soft delete: NULL = active)
+  idempotency_key UUID     NULL   (client's Idempotency-Key, decision 10)
+  request_fingerprint  string NULL   (SHA-256 of the canonical request)
+  UNIQUE (group_id, idempotency_key)
 
 expense_shares
   expense_id      UUIDv7   FK -> expenses.id
@@ -134,6 +149,11 @@ settlements
   payee_id        UUIDv7   FK -> users.id
   amount          BIGINT   (paise)
   created_at      DATETIME
+  updated_at      DATETIME NULL   (set on edit)
+  deleted_at      DATETIME NULL   (soft delete: NULL = active)
+  idempotency_key UUID     NULL   (client's Idempotency-Key, decision 10)
+  request_fingerprint  string NULL   (SHA-256 of the canonical request)
+  UNIQUE (group_id, idempotency_key)
 
 
 RULES (enforced in application code)
@@ -141,7 +161,8 @@ RULES (enforced in application code)
   - Everyone involved in a group transaction must be a member of that group:
       expenses:    paid_by and every expense_shares.user_id
       settlements: payer_id and payee_id
-  - Amounts must be positive. A settlement's payer and payee must be different users.
+  - Amounts must be positive and at most 10^12 paise (₹1000 crore), so oversized input is a
+    422 and never overflows BIGINT. A settlement's payer and payee must be different users.
 
 
 DECISIONS
@@ -186,16 +207,123 @@ DECISIONS
      app/domain    Pure calculations with no database (the split maths), unit-tested directly.
    Services raise domain errors (app/errors.py) that know nothing about HTTP; one exception
    handler in main.py maps them to status codes (NotFound 404, RuleViolation 422, Conflict 409).
+
+8. Debt simplification is greedy and works only from net balances.
+   Repeatedly, the biggest debtor pays the biggest creditor as much as they can
+   (ties broken by user id, so the result is deterministic). Each payment settles at
+   least one person, so n members need at most n - 1 payments. The true minimum is
+   NP-hard (it means splitting members into subsets whose nets sum to 0), so greedy
+   is the practical choice.
+   Simplified payments can be between people who never shared an expense
+   (A owes B, B owes C  ->  A pays C). Recording them as settlements brings every net
+   to 0, but the pairwise amounts between those people stay non-zero: simplification
+   settles nets, not pairwise debts.
+
+9. Editing and deleting expenses and settlements.
+   Deletes are soft: deleted_at is set and the row (and an expense's shares) stays, as an
+   audit trail. Every query that reads expenses or sums their shares filters on ACTIVE_EXPENSE,
+   and every query that reads settlements on ACTIVE_SETTLEMENT (deleted_at IS NULL), each
+   defined once in models.py. A deleted row is a 404 everywhere.
+   The one deliberate exception is the Idempotency-Key lookup (decision 10): a deleted row
+   still owns its key, so a late retry must be able to find it.
+   Edits are full replacements (PUT, not PATCH): only the calculated shares are stored,
+   not the split strategy or its values, so a partial update couldn't recalculate them.
+   The old shares are deleted and the new ones inserted in one transaction.
+   Edits overwrite the old values; keeping every version would need a revisions table.
+   Settlements are independent of expenses (people settle a running balance, not a bill),
+   so they are never changed by an edit or delete. If an edit or delete removes a debt that
+   was already settled, the balance flips sign: the overpayment is now owed back.
+   Concurrent edits are last-write-wins. A production version would add a version column
+   (optimistic locking) and return 409 when the expense changed since the client read it.
+   Settlements follow the same rules. A settlement edit is a plain update (no shares), and
+   deleting a settlement brings back the debt it paid.
+   Edits and deletes lock the row first (SELECT ... FOR UPDATE), so concurrent writes to the
+   same expense or settlement run one after another. Without the lock, two edits that change
+   who is in a split could both insert the same expense_shares key and one would fail with a
+   500; with it, a write that loses the race to a delete gets a 404. Writes stay on READ
+   COMMITTED: that is what lets a waiting writer re-check deleted_at after the lock is released.
+   PUT never creates (ids are generated by the server), so PUT to an unknown id is a 404.
+   DELETE of an already-deleted row is a 404; the server state is unchanged either way.
+   Lists are not paginated. A production version would use cursor pagination on
+   (created_at, id), which is cheap because UUIDv7 ids are time-ordered.
+   At larger scale, partial indexes on (group_id) WHERE deleted_at IS NULL help both tables.
+
+10. POSTs that record money accept an Idempotency-Key, so a retry never records it twice.
+   The problem: the server commits, then the response is lost (timeout, dropped connection).
+   The client can't tell "never arrived" from "saved, reply lost", so it must retry, and
+   without a key the retry records the expense or settlement a second time.
+   At-least-once delivery (the client retries) + idempotent processing (the server recognises
+   the retry) = an exactly-once effect.
+
+   The client contract:
+     - The key is a random UUID (uuid4: 122 random bits), generated ONCE, when the user starts
+       the action (taps "Save"), outside the retry loop:
+           key = uuid4()
+           for attempt in range(5):
+               try:   response = post(url, body, headers={"Idempotency-Key": key})
+               except (Timeout, ConnectionError): backoff(); continue      # same key
+               if response.status >= 500: backoff(); continue              # same key
+               return response                                             # 2xx/4xx: final
+     - Stored with the pending request (an outbox) if it must survive an app restart.
+     - Never derived from the user or the request content: two genuine identical expenses
+       (two ₹200 coffees) would collide and the second would be lost.
+
+       event                                          key
+       user taps Save                                 new uuid4()
+       timeout / connection error / 5xx -> retry      the SAME key
+       app restarts with the request still pending    the SAME key (from the outbox)
+       user taps Save again, even with identical data new uuid4()
+
+   What the server does (services/idempotency.py):
+     - The key is stored on the row it creates, with a fingerprint of the request, under
+       UNIQUE (group_id, idempotency_key). Requests without a key store NULL; NULLs are
+       distinct in a UNIQUE constraint, so they never collide.
+     - Key not seen before: normal create, 201.
+     - Key seen before, same fingerprint: a retry. The stored row is returned (201) with the
+       header Idempotent-Replayed: true, as it is NOW (edits since are included).
+     - Key seen before, different fingerprint: 422. A client bug: the key was reused for a
+       different request. Checked first, whatever the stored row's state.
+     - Key seen before, row since deleted: 409. The request was already processed; a late
+       retry must never bring back an expense someone deliberately deleted. Doing it again
+       is a new action, so the client sends a new key.
+     - A request that fails (e.g. 422) stores nothing, so a corrected retry with the same
+       key goes through.
+     - Simultaneous retries: both pass the lookup, both insert; Postgres makes the second
+       wait on the unique index until the first commits, then raises a unique violation.
+       The loser catches it (by constraint name) and returns the winner's row. Same
+       insert-then-handle pattern as the duplicate phone check: no check-then-insert race,
+       and never a half-finished state to report.
+
+   What the server can't do: force a client to reuse its key. A client that generates a new
+   key per retry gets duplicates, which is no worse than having no key.
+
+   Lifecycle example:
+       tap Save -> K1;  POST(K1) commits, reply lost;  POST(K1) -> 201, replayed
+       expense deleted;  a late POST(K1) arrives -> 409 (not recreated)
+       tap Save again -> K2;  POST(K2) -> 201, a new expense
+
+   The fingerprint is a check, not the key: a hash of the request would merge genuine
+   duplicates. It is the SHA-256 of a canonical form of the validated request, so retries
+   that rebuild the body slightly differently still match: names stripped, splits sorted by
+   user, Decimal values normalised ("50" == "50.00"), strings and numbers alike.
+   The key lives on the row, not in a separate table: it is written in the same transaction
+   as the row, so the two can never disagree. A separate idempotency table storing whole
+   responses (Stripe's approach) generalises to any endpoint, but needs expiry and cleanup;
+   keys stored on the row never expire, at a cost of a few bytes per row.
+   Keys are scoped to a group (the collection the POST writes to). PUT and DELETE need no
+   key: repeating them leaves the same state.
 ```
 
 ## 3. API
 
 ```text
 API DESIGN
-All amounts are integers in paise. All IDs are UUIDs.
+All amounts are integers in paise, from 1 to 10^12 (₹1000 crore). All IDs are UUIDs.
+POSTs that record money accept an optional Idempotency-Key header (decision 10).
 The HTTP status code carries success or failure; response bodies hold only data.
 Errors return { "detail": "<reason>" }.
-No auth: the acting user is passed explicitly (in the path or the request body).
+No auth: requests carry no caller identity. The users in a request (paid_by, payer_id,
+payee_id, splits) say who the money involves, not who is making the request.
 
 
 USERS
@@ -233,7 +361,7 @@ POST /groups/{group_id}/members
     user_ids   [ user_id ]
   }
   response 200 {
-    members   [ { user_id, user_name } ]   <- the full member list after adding
+    members   [ { user_id, user_name } ]   <- the full member list after adding, ordered by name
   }
   Idempotent: users already in the group are ignored, and an id listed twice
   is added once.
@@ -255,6 +383,8 @@ EXPENSES
 
 POST /groups/{group_id}/expenses
   Create an expense in a group.
+  header   Idempotency-Key: <uuid>   optional; a retry with the same key returns the
+           original expense (201, Idempotent-Replayed: true) instead of creating another
   request {
     name             string
     amount           int (paise)
@@ -270,7 +400,8 @@ POST /groups/{group_id}/expenses
     the expense is split equally between all group members.
   response 201 {
     id, name, amount, paid_by, created_at
-    shares   [ { user_id, amount } ]   <- the calculated paise per person
+    updated_at                         <- null until the expense is edited
+    shares   [ { user_id, amount } ]   <- the calculated paise per person, ordered by user_id
   }
   errors
     404  group not found
@@ -282,31 +413,49 @@ POST /groups/{group_id}/expenses
          exact amounts don't add up to the total
          percentages don't add up to 100
          exact or percentage split with no splits listed (only equal has a default)
+         amount (or an exact value) above 10^12
+         Idempotency-Key is not a UUID, or was already used for a different request
+    409  Idempotency-Key was already used, and that expense has since been deleted
 
 GET /groups/{group_id}/expenses
-  List a group's expenses, newest first.
+  List a group's expenses, newest first. Deleted expenses are not listed.
   response 200 {
     expenses   [ same shape as the POST response, shares included ]
   }
   errors
     404  group not found
 
-PUT /groups/{group_id}/expenses/{expense_id}          [STRETCH]
-  Replace an expense: same request as POST.
-  Deletes the old shares and recomputes them in one DB transaction.
+GET /groups/{group_id}/expenses/{expense_id}
+  One expense.
   response 200   same shape as POST
-  errors   404 expense not found, 422 same as POST
+  errors
+    404  group not found
+    404  expense not found, deleted, or in a different group
 
-DELETE /groups/{group_id}/expenses/{expense_id}       [STRETCH]
-  Delete an expense and its shares.
+PUT /groups/{group_id}/expenses/{expense_id}
+  Replace an expense: same request as POST (see decision 9 for why not PATCH).
+  Deletes the old shares and recalculates them in one DB transaction; sets updated_at.
+  Concurrent edits: last write wins.
+  response 200   same shape as POST
+  errors
+    404  group not found
+    404  expense not found, already deleted, or in a different group
+    422  same as POST; the expense is left unchanged
+
+DELETE /groups/{group_id}/expenses/{expense_id}
+  Soft-delete an expense: it disappears from expenses, balances and simplified debts.
+  Settlements are not changed (decision 9).
   response 204   (no body)
-  errors   404 expense not found
+  errors
+    404  group not found
+    404  expense not found, already deleted, or in a different group
 
 
 SETTLEMENTS
 
 POST /groups/{group_id}/settlements
   Record a payment from one member to another.
+  header   Idempotency-Key: <uuid>   optional; same behaviour as for expenses
   request {
     payer_id   user_id
     payee_id   user_id
@@ -314,13 +463,46 @@ POST /groups/{group_id}/settlements
   }
   response 201 {
     id, payer_id, payee_id, amount, created_at
+    updated_at   <- null until the settlement is edited
   }
   errors
     404  group not found
     422  payer or payee is not a member of the group
          payer and payee are the same user
-         amount is zero or negative
+         amount is zero or negative, or above 10^12
+         Idempotency-Key is not a UUID, or was already used for a different request
+    409  Idempotency-Key was already used, and that settlement has since been deleted
   A settlement may be larger than what is owed; the balance simply flips sign.
+
+GET /groups/{group_id}/settlements
+  List a group's settlements, newest first. Deleted settlements are not listed.
+  response 200 {
+    settlements   [ same shape as the POST response ]
+  }
+  errors
+    404  group not found
+
+GET /groups/{group_id}/settlements/{settlement_id}
+  One settlement.
+  response 200   same shape as POST
+  errors
+    404  group not found
+    404  settlement not found, deleted, or in a different group
+
+PUT /groups/{group_id}/settlements/{settlement_id}
+  Replace a settlement: same request as POST; sets updated_at. Last write wins.
+  response 200   same shape as POST
+  errors
+    404  group not found
+    404  settlement not found, already deleted, or in a different group
+    422  same as POST; the settlement is left unchanged
+
+DELETE /groups/{group_id}/settlements/{settlement_id}
+  Soft-delete a settlement: balances no longer count it, so the debt it paid comes back.
+  response 204   (no body)
+  errors
+    404  group not found
+    404  settlement not found, already deleted, or in a different group
 
 
 BALANCES
@@ -358,11 +540,54 @@ GET /users/{user_id}/balances
 
 GET /groups/{group_id}/simplified-debts               [STRETCH]
   Debt simplification: the payments that would settle everyone in the group.
-  Calculated from net balances (greedy: biggest debtor pays biggest creditor).
+  Calculated from net balances (greedy: biggest debtor pays biggest creditor;
+  see decision 8). At most (members - 1) payments, biggest first.
   Nothing is stored; recording a payment is still a POST to /settlements.
   response 200 {
-    payments   [ { from_user_id, to_user_id, amount } ]
+    payments   [ { from_user_id, to_user_id, amount } ]   <- empty when everyone is settled
   }
   errors
     404  group not found
 ```
+
+## 4. Tests
+
+```text
+docker compose run --rm --build test                          # everything (~1 min)
+docker compose run --rm --build test pytest tests/unit -v     # any pytest arguments
+```
+
+The `test` service runs pytest against a separate database, `<POSTGRES_DB>_test`, on the same
+Postgres server. It is created on first use and its schema is rebuilt at the start of every
+run. Every table is emptied before each test, and the suite refuses to run against a database
+whose name does not end in `_test`. Tests use real Postgres, not SQLite, because much of what
+they check is Postgres behaviour: ON CONFLICT, constraint names, snapshots and row locks.
+Any warning fails the run (pytest.ini).
+
+```text
+tests/unit/                        Pure logic, no database
+  test_splits.py                   Every split rule; property tests (Hypothesis) against an
+                                   independent integer-only calculation
+  test_simplify.py                 Debt simplification; property tests: settles everyone,
+                                   at most n-1 payments, biggest first, deterministic
+tests/integration/                 Real Postgres, through the API unless noted
+  test_users_and_groups.py         Validation boundaries, 409 duplicate phone, idempotent members
+  test_expenses.py                 Each split strategy; one case per kind of 422, each checked to save nothing
+  test_expense_edits.py            PUT/DELETE, soft delete, interaction with settlements
+  test_settlements.py              Create, list, get, edit, delete
+  test_balances.py                 The worked example by hand; ordering; every error case
+  test_simplified_debts.py         The endpoint and its wiring to balances
+  test_database_constraints.py     CHECK/UNIQUE/PK/FK rules written directly, bypassing the API
+  test_snapshot.py                 Forces a write between two balance queries; the result must be
+                                   the state before it. A control test proves the write lands.
+  test_idempotency.py              Idempotency-Key: replays, equivalent bodies, 422/409 cases
+  test_concurrency.py              Parallel threads, one connection each: row locks on edit/delete,
+                                   idempotent member adds, one winner for a duplicate phone,
+                                   simultaneous retries with one Idempotency-Key
+  test_invariants.py               Seeded random operations across two groups; after every step the
+                                   API is compared with a model and an independent balance oracle
+```
+
+The concurrency, snapshot, ordering and idempotency tests were each checked by removing the
+code they protect (the row lock, the snapshot, the share ordering, the idempotency UNIQUE
+constraint) and confirming that they fail.
