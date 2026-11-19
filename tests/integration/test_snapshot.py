@@ -36,6 +36,7 @@ def write_during_read(monkeypatch, trip):
                 expenses_service.create_expense(
                     other_connection, uuid.UUID(trip.group), name="Concurrent", amount=90000,
                     paid_by=uuid.UUID(trip.kush), strategy=SplitStrategy.EQUAL, splits=[],
+                    idempotency_key=uuid.uuid4(), fingerprint="0" * 64,
                 )
         return result
 

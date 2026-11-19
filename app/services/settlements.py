@@ -25,16 +25,13 @@ def create_settlement(
     payer_id: uuid.UUID,
     payee_id: uuid.UUID,
     amount: int,
-    idempotency_key: uuid.UUID | None = None,
-    fingerprint: str | None = None,
+    idempotency_key: uuid.UUID,
+    fingerprint: str,
 ) -> tuple[Settlement, bool]:
     """Record a settlement. Returns (settlement, replayed); see create_expense for the key."""
-    if (idempotency_key is None) != (fingerprint is None):
-        raise ValueError("idempotency_key and fingerprint go together")
-    if idempotency_key is not None:
-        existing = idempotency.find_by_key(db, Settlement, group_id, idempotency_key)
-        if existing is not None:
-            return idempotency.replay(existing, fingerprint), True
+    existing = idempotency.find_by_key(db, Settlement, group_id, idempotency_key)
+    if existing is not None:
+        return idempotency.replay(existing, fingerprint), True
 
     get_group(db, group_id)
     _require_members(db, group_id, payer_id, payee_id)
@@ -52,7 +49,7 @@ def create_settlement(
         db.commit()
     except IntegrityError as error:
         db.rollback()
-        if idempotency_key is None or not idempotency.is_key_conflict(error, Settlement):
+        if not idempotency.is_key_conflict(error, Settlement):
             raise
         # A concurrent request with the same key committed first: this is a retry of it.
         winner = idempotency.find_by_key(db, Settlement, group_id, idempotency_key)

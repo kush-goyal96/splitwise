@@ -40,12 +40,23 @@ def random_id() -> str:
     return str(uuid.uuid4())
 
 
+def keyed() -> dict:
+    """Idempotency columns for an Expense or Settlement inserted directly (both are NOT NULL)."""
+    return {"idempotency_key": uuid.uuid4(), "request_fingerprint": "0" * 64}
+
+
 class Api:
     def __init__(self, client: TestClient):
         self.client = client
 
-    def call(self, method: str, path: str, json: Any = None, *, expect: int) -> Response:
-        response = self.client.request(method, path, json=json)
+    def call(
+        self, method: str, path: str, json: Any = None, *, expect: int, headers: dict | None = None
+    ) -> Response:
+        # POSTs that record money require an Idempotency-Key. Tests get a fresh one (a new
+        # action) unless they pass their own; test_idempotency.py tests the key itself.
+        if method == "POST" and path.endswith(("/expenses", "/settlements")):
+            headers = {"Idempotency-Key": str(uuid.uuid4()), **(headers or {})}
+        response = self.client.request(method, path, json=json, headers=headers)
         assert response.status_code == expect, (
             f"{method} {path}: expected {expect}, got {response.status_code}: {response.text}"
         )

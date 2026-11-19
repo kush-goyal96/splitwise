@@ -2,8 +2,9 @@
 
 A client that doesn't get a response can't tell whether its request was recorded, so it
 retries. With the same key, a retry must return the original row and record nothing new.
-Expenses and settlements share one implementation (services/idempotency.py), so the
-detailed cases run against expenses, plus one replay test for settlements.
+The key is required. Expenses and settlements share one implementation
+(services/idempotency.py), so the detailed cases run against expenses, plus one replay
+test for settlements.
 """
 
 import uuid
@@ -30,10 +31,20 @@ def hotel(trip):
     return {"name": "Hotel", "amount": 500000, "paid_by": trip.ansh, "split_strategy": "equal"}
 
 
-def test_without_a_key_a_retry_records_the_expense_twice(api, trip, path, hotel):
-    # The problem this feature solves. (Keyless rows store NULL, and NULLs never collide.)
-    post(api, path, hotel)
-    post(api, path, hotel)
+@pytest.mark.parametrize("kind", ["expenses", "settlements"])
+def test_missing_key_is_400_and_saves_nothing(api, trip, kind):
+    body = ({"name": "Hotel", "amount": 500000, "paid_by": trip.ansh, "split_strategy": "equal"}
+            if kind == "expenses" else {"payer_id": trip.kush, "payee_id": trip.ansh, "amount": 100})
+    response = post(api, f"/groups/{trip.group}/{kind}", body)
+    assert response.status_code == 400
+    assert response.json() == {"detail": "Idempotency-Key header is required"}
+    assert getattr(api, kind)(trip.group) == []
+
+
+def test_new_keys_mean_new_actions(api, trip, path, hotel):
+    # Two genuine identical expenses (two ₹200 coffees) are two actions with two keys.
+    post(api, path, hotel, str(uuid.uuid4()))
+    post(api, path, hotel, str(uuid.uuid4()))
     assert len(api.expenses(trip.group)) == 2
 
 

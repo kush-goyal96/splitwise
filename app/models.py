@@ -38,18 +38,11 @@ class Base(DeclarativeBase):
 
 
 def idempotency_constraints() -> tuple:
-    """Constraints for tables written by POSTs that accept an Idempotency-Key (decision 10).
+    """Constraints for tables written by POSTs that require an Idempotency-Key (decision 10).
 
     The key is unique per group: a retry of the same request finds the row it created.
-    NULL keys (requests sent without the header) are distinct in Postgres, so any number
-    of those are allowed. A key is always stored together with its request fingerprint.
     """
-    return (
-        UniqueConstraint("group_id", "idempotency_key"),
-        CheckConstraint(
-            "(idempotency_key IS NULL) = (request_fingerprint IS NULL)", name="idempotency_complete"
-        ),
-    )
+    return (UniqueConstraint("group_id", "idempotency_key"),)
 
 
 class User(Base):
@@ -105,9 +98,9 @@ class Expense(Base):
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Soft delete: NULL = active. Deleted expenses (and their shares) stay for the audit trail.
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # Set when the POST carried an Idempotency-Key; never returned by the API.
-    idempotency_key: Mapped[uuid.UUID | None]
-    request_fingerprint: Mapped[str | None] = mapped_column(String(64))  # SHA-256 hex
+    # The POST's Idempotency-Key and request fingerprint (decision 10); never returned by the API.
+    idempotency_key: Mapped[uuid.UUID]
+    request_fingerprint: Mapped[str] = mapped_column(String(64))  # SHA-256 hex
 
     # Saving an Expense saves its shares too; removing a share from the list deletes it
     # (used when an edit replaces the shares). Ordered by user_id: without an ORDER BY,
@@ -159,9 +152,9 @@ class Settlement(Base):
     updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Soft delete: NULL = active.
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # Set when the POST carried an Idempotency-Key; never returned by the API.
-    idempotency_key: Mapped[uuid.UUID | None]
-    request_fingerprint: Mapped[str | None] = mapped_column(String(64))  # SHA-256 hex
+    # The POST's Idempotency-Key and request fingerprint (decision 10); never returned by the API.
+    idempotency_key: Mapped[uuid.UUID]
+    request_fingerprint: Mapped[str] = mapped_column(String(64))  # SHA-256 hex
 
 
 # Every query that reads settlements must include this filter.

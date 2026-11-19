@@ -132,8 +132,8 @@ expenses
   created_at      DATETIME
   updated_at      DATETIME NULL   (set on edit)
   deleted_at      DATETIME NULL   (soft delete: NULL = active)
-  idempotency_key UUID     NULL   (client's Idempotency-Key, decision 10)
-  request_fingerprint  string NULL   (SHA-256 of the canonical request)
+  idempotency_key UUID           (client's Idempotency-Key, decision 10)
+  request_fingerprint  string    (SHA-256 of the canonical request)
   UNIQUE (group_id, idempotency_key)
 
 expense_shares
@@ -151,8 +151,8 @@ settlements
   created_at      DATETIME
   updated_at      DATETIME NULL   (set on edit)
   deleted_at      DATETIME NULL   (soft delete: NULL = active)
-  idempotency_key UUID     NULL   (client's Idempotency-Key, decision 10)
-  request_fingerprint  string NULL   (SHA-256 of the canonical request)
+  idempotency_key UUID           (client's Idempotency-Key, decision 10)
+  request_fingerprint  string    (SHA-256 of the canonical request)
   UNIQUE (group_id, idempotency_key)
 
 
@@ -248,12 +248,19 @@ DECISIONS
    (created_at, id), which is cheap because UUIDv7 ids are time-ordered.
    At larger scale, partial indexes on (group_id) WHERE deleted_at IS NULL help both tables.
 
-10. POSTs that record money accept an Idempotency-Key, so a retry never records it twice.
+10. POSTs that record money require an Idempotency-Key, so a retry never records it twice.
    The problem: the server commits, then the response is lost (timeout, dropped connection).
    The client can't tell "never arrived" from "saved, reply lost", so it must retry, and
    without a key the retry records the expense or settlement a second time.
    At-least-once delivery (the client retries) + idempotent processing (the server recognises
    the retry) = an exactly-once effect.
+
+   Required, not optional. Public APIs (Stripe, PayPal) make the key optional because they
+   serve third-party clients they don't control, many of which never retry, and their own
+   SDKs add keys automatically. This is a first-party backend recording money, with no
+   outside integrators and nothing to stay compatible with, so safe retries are part of
+   the contract: a missing key is 400 (as the IETF Idempotency-Key draft specifies), so a
+   client that forgets it fails at once in development instead of creating duplicates later.
 
    The client contract:
      - The key is a random UUID (uuid4: 122 random bits), generated ONCE, when the user starts
@@ -276,8 +283,8 @@ DECISIONS
 
    What the server does (services/idempotency.py):
      - The key is stored on the row it creates, with a fingerprint of the request, under
-       UNIQUE (group_id, idempotency_key). Requests without a key store NULL; NULLs are
-       distinct in a UNIQUE constraint, so they never collide.
+       UNIQUE (group_id, idempotency_key). Both columns are NOT NULL.
+     - No key: 400. Not a UUID: 422.
      - Key not seen before: normal create, 201.
      - Key seen before, same fingerprint: a retry. The stored row is returned (201) with the
        header Idempotent-Replayed: true, as it is NOW (edits since are included).
@@ -294,8 +301,9 @@ DECISIONS
        insert-then-handle pattern as the duplicate phone check: no check-then-insert race,
        and never a half-finished state to report.
 
-   What the server can't do: force a client to reuse its key. A client that generates a new
-   key per retry gets duplicates, which is no worse than having no key.
+   What the server can't do: force a client to reuse its key on a retry. Requiring the
+   header guarantees a key is sent, not that it's the right one: a client that generates a
+   new key per retry still gets duplicates.
 
    Lifecycle example:
        tap Save -> K1;  POST(K1) commits, reply lost;  POST(K1) -> 201, replayed
@@ -319,7 +327,7 @@ DECISIONS
 ```text
 API DESIGN
 All amounts are integers in paise, from 1 to 10^12 (₹1000 crore). All IDs are UUIDs.
-POSTs that record money accept an optional Idempotency-Key header (decision 10).
+POSTs that record money require an Idempotency-Key header (decision 10).
 The HTTP status code carries success or failure; response bodies hold only data.
 Errors return { "detail": "<reason>" }.
 No auth: requests carry no caller identity. The users in a request (paid_by, payer_id,
@@ -383,7 +391,7 @@ EXPENSES
 
 POST /groups/{group_id}/expenses
   Create an expense in a group.
-  header   Idempotency-Key: <uuid>   optional; a retry with the same key returns the
+  header   Idempotency-Key: <uuid>   required; a retry with the same key returns the
            original expense (201, Idempotent-Replayed: true) instead of creating another
   request {
     name             string
@@ -415,6 +423,7 @@ POST /groups/{group_id}/expenses
          exact or percentage split with no splits listed (only equal has a default)
          amount (or an exact value) above 10^12
          Idempotency-Key is not a UUID, or was already used for a different request
+    400  Idempotency-Key header missing
     409  Idempotency-Key was already used, and that expense has since been deleted
 
 GET /groups/{group_id}/expenses
@@ -455,7 +464,7 @@ SETTLEMENTS
 
 POST /groups/{group_id}/settlements
   Record a payment from one member to another.
-  header   Idempotency-Key: <uuid>   optional; same behaviour as for expenses
+  header   Idempotency-Key: <uuid>   required; same behaviour as for expenses
   request {
     payer_id   user_id
     payee_id   user_id
@@ -471,6 +480,7 @@ POST /groups/{group_id}/settlements
          payer and payee are the same user
          amount is zero or negative, or above 10^12
          Idempotency-Key is not a UUID, or was already used for a different request
+    400  Idempotency-Key header missing
     409  Idempotency-Key was already used, and that settlement has since been deleted
   A settlement may be larger than what is owed; the balance simply flips sign.
 

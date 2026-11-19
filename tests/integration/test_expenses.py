@@ -11,7 +11,7 @@ import pytest
 from uuid6 import uuid7
 
 from app.models import Expense, ExpenseShare
-from tests.integration.helpers import equal, random_id, shares_of, values
+from tests.integration.helpers import equal, keyed, random_id, shares_of, values
 
 # ---------- Creating ----------
 
@@ -114,7 +114,7 @@ def test_list_breaks_created_at_ties_by_id(api, trip, db):
     older_id, newer_id = uuid7(), uuid7()
     for expense_id in (older_id, newer_id):
         db.add(Expense(
-            id=expense_id, group_id=uuid.UUID(trip.group), name="Same time", amount=100,
+            **keyed(), id=expense_id, group_id=uuid.UUID(trip.group), name="Same time", amount=100,
             paid_by=uuid.UUID(trip.kush), shares=[ExpenseShare(user_id=uuid.UUID(trip.kush), amount=100)],
         ))
     db.commit()

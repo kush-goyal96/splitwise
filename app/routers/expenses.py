@@ -17,7 +17,7 @@ def create_expense(
     payload: ExpenseCreate,
     db: DbSession,
     response: Response,
-    idempotency_key: IdempotencyKey = None,
+    idempotency_key: IdempotencyKey,
 ) -> Expense:
     expense, replayed = service.create_expense(
         db,
@@ -28,7 +28,7 @@ def create_expense(
         strategy=payload.split_strategy,
         splits=[(entry.user_id, entry.value) for entry in payload.splits],
         idempotency_key=idempotency_key,
-        fingerprint=fingerprint(payload.fingerprint_data()) if idempotency_key else None,
+        fingerprint=fingerprint(payload.fingerprint_data()),
     )
     if replayed:
         response.headers[REPLAYED_HEADER] = "true"

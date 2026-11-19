@@ -2,7 +2,7 @@
 
 A REST API for splitting shared expenses within groups: record who paid for what, split it equally, by exact amounts or by percentage, and see who owes whom, in each group and across all of a user's groups.
 
-**FastAPI · SQLAlchemy 2 · PostgreSQL 16 · Docker Compose · pytest + Hypothesis (155 tests)**
+**FastAPI · SQLAlchemy 2 · PostgreSQL 16 · Docker Compose · pytest + Hypothesis (157 tests)**
 
 | Requirement | Where it's met |
 |---|---|
@@ -463,13 +463,15 @@ sequenceDiagram
     S-->>C: 201 original row · Idempotent-Replayed: true
 ```
 
-| The key is stored and… | Response |
+| The key is… | Response |
 |---|---|
+| missing | 400: required on every POST that records money |
 | never seen before | create it: 201 |
 | seen, with the same request | **replay**: the stored row (as it is now), 201, `Idempotent-Replayed: true` |
 | seen, with a *different* request | 422: the key was reused for something else (a client bug) |
 | seen, but that row was since deleted | 409: already processed; a late retry never brings back a deliberate delete |
 
+- **Required, not optional.** Public APIs such as Stripe make the key optional because they serve third-party clients they don't control. This is a first-party backend recording money, so safe retries are part of the contract, and a client that forgets the key fails immediately instead of creating duplicates later.
 - **The client generates the key:** a random UUID per user action, reused only by that action's retries. It's never derived from the user or the content, because two genuine ₹200 coffees must stay two expenses.
 - **The fingerprint is a check, not the key.** It's a SHA-256 of a *canonical* form of the request (splits sorted, `"50"` = `"50.00"`, names trimmed), so a retry that rebuilds the body slightly differently still matches.
 - **The key lives on the row**, written in the same transaction, so the row and its key can never disagree. Stripe-style separate tables generalise to any endpoint but need expiry and cleanup.
@@ -491,7 +493,7 @@ Full client contract and edge cases: [DESIGN.md decision 10](DESIGN.md#tables-ru
 | **Equal split with no list = whole group** | Always require a list | Matches the common case | A client must list ids to split between a subset |
 | **Soft delete** | Hard delete | Audit trail, undo | Every query must filter (enforced by one shared expression + tests) |
 | **PUT, not PATCH** | Partial updates | The split inputs aren't stored, so shares can only be recalculated from a full request | Clients resend the whole expense |
-| **Idempotency key stored on the row** | A separate idempotency table storing whole responses | Same transaction as the row, so they can't disagree; no expiry or cleanup job | Only the two POSTs that record money are covered; keys never expire |
+| **Idempotency key required, stored on the row** | Optional key; or a separate idempotency table storing whole responses | First-party backend recording money, so safe retries are part of the contract. Same transaction as the row, so they can't disagree; no expiry or cleanup job | Every client must send a key; keys never expire |
 | **Last write wins on concurrent edits** | Optimistic locking (`version` column → 409) | No auth and no client to resolve conflicts yet | A lost update is possible (documented) |
 | **Greedy debt simplification** | An exact minimum | Exact is NP-hard; greedy is ≤ n − 1 and O(n log n) | Occasionally one more payment than optimal |
 | **`create_all` on startup** | Alembic migrations | Fewer moving parts for a project with no deployed data | A model change needs `docker compose down -v` |
@@ -513,12 +515,12 @@ Full request and response bodies, and every error case, are in **[DESIGN.md §3]
 | `POST` | `/groups` | 201 | 422 |
 | `GET` | `/groups/{group_id}` | 200 (with members) | 404 |
 | `POST` | `/groups/{group_id}/members` | 200 (full member list; idempotent) | 404 group or user · 422 |
-| `POST` | `/groups/{group_id}/expenses` | 201 (with calculated shares; a retry with the same `Idempotency-Key` replays it) | 404 · 409 key's expense was deleted · 422 |
+| `POST` | `/groups/{group_id}/expenses` | 201 (with calculated shares; a retry with the same `Idempotency-Key` replays it) | 400 no key · 404 · 409 key's expense was deleted · 422 |
 | `GET` | `/groups/{group_id}/expenses` | 200 (newest first) | 404 |
 | `GET` | `/groups/{group_id}/expenses/{expense_id}` | 200 | 404 |
 | `PUT` | `/groups/{group_id}/expenses/{expense_id}` | 200 | 404 · 422 (expense unchanged) |
 | `DELETE` | `/groups/{group_id}/expenses/{expense_id}` | 204 | 404 |
-| `POST` | `/groups/{group_id}/settlements` | 201 (replayed on retry, as above) | 404 · 409 key's settlement was deleted · 422 |
+| `POST` | `/groups/{group_id}/settlements` | 201 (replayed on retry, as above) | 400 no key · 404 · 409 key's settlement was deleted · 422 |
 | `GET` | `/groups/{group_id}/settlements` | 200 (newest first) | 404 |
 | `GET` | `/groups/{group_id}/settlements/{settlement_id}` | 200 | 404 |
 | `PUT` | `/groups/{group_id}/settlements/{settlement_id}` | 200 | 404 · 422 |
@@ -533,14 +535,14 @@ Full request and response bodies, and every error case, are in **[DESIGN.md §3]
 - Business-rule errors return `{"detail": "<readable reason>"}`.
 - Request-shape errors (from Pydantic) return `{"detail": [{"loc": [...], "msg": "..."}]}`.
 - **404** means the thing doesn't exist. **422** means it exists but the request breaks a rule, e.g. the user isn't a member of this group.
-- Amounts are integers in paise from 1 to 10¹². POSTs that record money accept an optional `Idempotency-Key: <uuid>` header.
+- Amounts are integers in paise from 1 to 10¹². POSTs that record money **require** an `Idempotency-Key: <uuid>` header (400 if missing).
 
 ---
 
 ## 12. Testing
 
 ```bash
-docker compose run --rm --build test                        # all 155 tests, ~1 min
+docker compose run --rm --build test                        # all 157 tests, ~1 min
 docker compose run --rm --build test pytest tests/unit -v   # any pytest arguments
 ```
 
@@ -548,7 +550,7 @@ docker compose run --rm --build test pytest tests/unit -v   # any pytest argumen
 |---|---|---|
 | **Unit**: split maths, debt simplification | 35 | One example per rule, plus **Hypothesis property tests**: thousands of generated inputs compared against an independent integer-only calculation |
 | **API**: every endpoint | 78 | Happy paths, the worked example by hand, and one case per kind of error (each rejected request is also checked to have **saved nothing**) |
-| **Idempotency keys** | 11 | Replays, equivalent bodies (reordered splits, `"50"` vs `"50.00"`), the 409/422 cases, scoping, failed requests not remembered |
+| **Idempotency keys** | 13 | Missing key is 400, replays, equivalent bodies (reordered splits, `"50"` vs `"50.00"`), the 409/422 cases, scoping, failed requests not remembered |
 | **Database constraints** | 13 | Invalid rows written directly, bypassing the API; asserts the constraint *name* |
 | **Snapshot isolation** | 6 | Forces a write between two balance queries; the result must be the state before it. A control test proves the write really lands. |
 | **Concurrency** | 8 | Real parallel connections: racing edits, edit vs delete, double deletes, duplicate signups, member adds, simultaneous retries with one key |

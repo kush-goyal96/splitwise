@@ -17,7 +17,7 @@ def create_settlement(
     payload: SettlementCreate,
     db: DbSession,
     response: Response,
-    idempotency_key: IdempotencyKey = None,
+    idempotency_key: IdempotencyKey,
 ) -> Settlement:
     settlement, replayed = service.create_settlement(
         db,
@@ -26,7 +26,7 @@ def create_settlement(
         payee_id=payload.payee_id,
         amount=payload.amount,
         idempotency_key=idempotency_key,
-        fingerprint=fingerprint(payload.fingerprint_data()) if idempotency_key else None,
+        fingerprint=fingerprint(payload.fingerprint_data()),
     )
     if replayed:
         response.headers[REPLAYED_HEADER] = "true"
