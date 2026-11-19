@@ -18,6 +18,7 @@ from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session
 
 from app.database import use_snapshot
+from app.domain.simplify import Transfer, simplify_debts
 from app.errors import RuleViolationError
 from app.models import Expense, ExpenseShare, Group, GroupMember, Settlement, User
 from app.services.groups import get_group
@@ -75,6 +76,15 @@ def user_balances(db: Session, user_id: uuid.UUID) -> list[GroupNet]:
     use_snapshot(db)
     get_user(db, user_id)
     return [GroupNet(*row) for row in _user_group_nets(db, user_id)]
+
+
+def simplified_debts(db: Session, group_id: uuid.UUID) -> list[Transfer]:
+    """The fewest payments (greedy) that would settle everyone in the group.
+    Nothing is stored; members record actual payments as settlements."""
+    use_snapshot(db)
+    get_group(db, group_id)
+    member_ids = list(_member_names(db, group_id))
+    return simplify_debts(_group_nets(db, group_id, member_ids))
 
 
 # ---------- Queries ----------

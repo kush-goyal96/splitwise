@@ -8,6 +8,8 @@ from app.schemas import (
     GroupNet,
     MemberBalance,
     PairwiseBalance,
+    Payment,
+    SimplifiedDebts,
     UserBalances,
     UserGroupBalance,
 )
@@ -34,6 +36,12 @@ def get_user_balance_in_group(
         net=sum(row.amount for row in rows),
         balances=[PairwiseBalance(**row._asdict()) for row in rows],
     )
+
+
+@router.get("/groups/{group_id}/simplified-debts", response_model=SimplifiedDebts)
+def get_simplified_debts(group_id: uuid.UUID, db: DbSession) -> SimplifiedDebts:
+    transfers = service.simplified_debts(db, group_id)
+    return SimplifiedDebts(payments=[Payment(**t._asdict()) for t in transfers])
 
 
 @router.get("/users/{user_id}/balances", response_model=UserBalances)
