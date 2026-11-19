@@ -33,8 +33,9 @@ CMD ["pytest"]
 # ---------- app: the API server (the default target, so `docker build .` builds this) ----------
 FROM base AS app
 
+# Only the application package: the runtime image carries no tests, docs or dev files.
 # Owned by root and only readable by the app user: a compromised process can't rewrite its own code.
-COPY . .
+COPY app/ app/
 
 EXPOSE 8000
 
