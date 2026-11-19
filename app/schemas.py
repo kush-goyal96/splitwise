@@ -10,7 +10,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, PositiveInt, StringConstraints, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from app.domain.splits import SplitStrategy
 
@@ -23,8 +23,13 @@ ExpenseName = Annotated[str, StringConstraints(strip_whitespace=True, min_length
 # Optional leading +, then 7-15 digits (the E.164 limit). Spaces and dashes are not allowed.
 PhoneNumber = Annotated[str, StringConstraints(strip_whitespace=True, pattern=r"^\+?[0-9]{7,15}$")]
 
-# All money is an integer number of paise.
-Paise = PositiveInt
+# Largest amount accepted: 10^12 paise = ₹1000 crore per expense or settlement.
+# A business limit far inside BIGINT (about 9.2 x 10^18), so oversized input is a 422,
+# never an overflow (500) in Postgres.
+MAX_PAISE = 10**12
+
+# All money is an integer number of paise, from 1 to MAX_PAISE.
+Paise = Annotated[int, Field(gt=0, le=MAX_PAISE)]
 
 
 class ORMModel(BaseModel):
@@ -85,7 +90,7 @@ class SplitEntry(BaseModel):
     # equal      -> must be omitted
     # exact      -> paise this user owes (must be a whole number)
     # percentage -> percent this user owes, up to 2 decimal places (e.g. 33.33)
-    value: Decimal | None = Field(default=None, gt=0, decimal_places=2)
+    value: Decimal | None = Field(default=None, gt=0, le=MAX_PAISE, decimal_places=2)
 
 
 class ExpenseCreate(BaseModel):
