@@ -15,30 +15,19 @@ A REST API for sharing expenses within groups. Friends form a group, record who 
 
 ## Contents
 
-- [SplitWise Backend](#splitwise-backend)
-  - [Contents](#contents)
-  - [1. Quick start](#1-quick-start)
-  - [2. A two-minute tour](#2-a-two-minute-tour)
-  - [3. Architecture](#3-architecture)
-    - [Three layers, each with one job](#three-layers-each-with-one-job)
-    - [One request, end to end](#one-request-end-to-end)
-    - [Project layout](#project-layout)
-  - [4. Data model](#4-data-model)
-    - [Rules enforced by the database](#rules-enforced-by-the-database)
-    - [Rules enforced by the application](#rules-enforced-by-the-application)
-    - [Choices in the schema](#choices-in-the-schema)
-  - [5. How splitting works](#5-how-splitting-works)
-  - [6. How balances work](#6-how-balances-work)
-    - [Calculated, not stored](#calculated-not-stored)
-    - [One consistent snapshot per read](#one-consistent-snapshot-per-read)
-  - [7. Debt simplification](#7-debt-simplification)
-  - [8. Editing and deleting](#8-editing-and-deleting)
-  - [9. Concurrency and consistency](#9-concurrency-and-consistency)
-    - [Safe retries: idempotency keys](#safe-retries-idempotency-keys)
-  - [10. Decisions and trade-offs](#10-decisions-and-trade-offs)
-  - [11. API reference](#11-api-reference)
-  - [12. Testing](#12-testing)
-  - [13. Limitations and production roadmap](#13-limitations-and-production-roadmap)
+- [1. Quick start](#1-quick-start)
+- [2. A two-minute tour](#2-a-two-minute-tour)
+- [3. Architecture](#3-architecture)
+- [4. Data model](#4-data-model)
+- [5. How splitting works](#5-how-splitting-works)
+- [6. How balances work](#6-how-balances-work)
+- [7. Debt simplification](#7-debt-simplification)
+- [8. Editing and deleting](#8-editing-and-deleting)
+- [9. Concurrency and consistency](#9-concurrency-and-consistency)
+- [10. Decisions and trade-offs](#10-decisions-and-trade-offs)
+- [11. API reference](#11-api-reference)
+- [12. Testing](#12-testing)
+- [13. Limitations and production roadmap](#13-limitations-and-production-roadmap)
 
 ---
 
@@ -60,6 +49,8 @@ docker compose up --build          # Postgres + the API on http://localhost:8000
 
 Tables are created on startup. The tests run against a separate `<POSTGRES_DB>_test` database on the same server, so they never touch development data.
 
+> **Port 5432 already in use?** A local Postgres is running. Stop it, or change the `db` port mapping in `docker-compose.yml` to `"5433:5432"`. The app is unaffected, because it reaches the database over Docker's internal network.
+
 ---
 
 ## 2. A two-minute tour
@@ -74,10 +65,12 @@ POST /groups         {"name": "Goa Trip"}                                       
 POST /groups/<trip>/members   {"user_ids": ["<kush>", "<shivanshu>", "<ansh>"]}   → 200
 ```
 
-Shivanshu pays ₹1000 for dinner. No participants are listed, so it is split equally between everyone:
+Shivanshu pays ₹1000 for dinner. No participants are listed, so it is split equally between everyone. Every POST that records money carries an `Idempotency-Key`, a fresh random UUID per action ([§9](#safe-retries-idempotency-keys)); it's shown here once and left out of the later examples:
 
 ```http
 POST /groups/<trip>/expenses
+Idempotency-Key: 3b9d6c1e-8f2a-4c57-9e10-7a4f2d8b6c31
+
 {"name": "Dinner", "amount": 100000, "paid_by": "<shivanshu>", "split_strategy": "equal"}
 
 → 201
@@ -141,7 +134,7 @@ GET /groups/<trip>/simplified-debts
    ]}
 ```
 
-Every number above is checked by a test (`tests/integration/test_balances.py::test_worked_example_*`).
+Every number above is checked by a test (`test_balances.py::test_worked_example_*` and `test_simplified_debts.py::test_worked_example`).
 
 ---
 
@@ -174,11 +167,6 @@ flowchart LR
 | `services/` | SQLAlchemy, transactions, the membership rule | build HTTP responses | API, concurrency and snapshot tests |
 | `domain/` | integers and `Decimal` | I/O of any kind | unit and property tests, in milliseconds |
 
-**Why it matters:**
-- **The split maths is pure.** It can be unit-tested with thousands of generated inputs, without a database.
-- **Each business rule lives in exactly one place.** For example, "everyone in a transaction must be a group member" is one function in `services/groups.py`, used by expenses and settlements.
-- **Errors carry meaning, not status codes.** A service raises `RuleViolationError`; `main.py` decides that means 422. Changing the error format is a one-line change.
-
 ### One request, end to end
 
 ```mermaid
@@ -210,7 +198,7 @@ app/
   main.py              App, lifespan (create tables), domain-error → HTTP mapping, /health
   database.py          Engine, session-per-request dependency, use_snapshot()
   models.py            SQLAlchemy models, constraint naming convention, ACTIVE_* filters
-  schemas.py           Pydantic request/response models (request shape only)
+  schemas.py           Pydantic request/response models: request shape, limits, phone normalisation
   errors.py            DomainError → NotFoundError / RuleViolationError / ConflictError
   idempotency.py       Idempotency-Key header + request fingerprint (HTTP side)
   routers/             users, groups, expenses, settlements, balances
@@ -310,7 +298,7 @@ Constraint names come from a **naming convention** (`models.py`), so they are pr
 ### Rules enforced by the application
 
 They need more than one row, so a CHECK constraint can't express them:
-- An expense's shares add up to its amount (asserted in `domain/splits.py`).
+- An expense's shares add up to its amount (an explicit check in `domain/splits.py`, so it also runs under `python -O`).
 - Everyone involved in a group transaction is a member of the group: the payer, every participant, and both people in a settlement.
 - A request that reuses an `Idempotency-Key` must match the original request's fingerprint.
 
@@ -318,16 +306,12 @@ They need more than one row, so a CHECK constraint can't express them:
 
 | Choice | Why |
 |---|---|
-| **Integer paise in `BIGINT`** | Floats can't represent money exactly (`0.1 + 0.2 ≠ 0.3`). `BIGINT` holds up to ₹92 quadrillion; `INT` would stop at about ₹2.1 crore. The API caps each amount at 10¹² paise (₹1000 crore), so oversized input is a 422, never an overflow. |
 | **UUIDv7 primary keys** | Not guessable or enumerable like 1, 2, 3, and safe to generate anywhere. Unlike UUIDv4 they are **time-ordered**, so B-tree inserts stay sequential and `ORDER BY created_at, id` is a stable tie-break. |
 | **Composite primary keys on join tables** | `(group_id, user_id)` *is* the identity of a membership. A surrogate id would need a separate UNIQUE constraint to say the same thing. |
-| **Every share stored, even for equal splits, next to the split as entered** | Balance queries only read the calculated `amount`: a share is a share. The inputs (`split_strategy`, `input_value`) are kept so an edit form can show the split again; 33.33 % can't be recovered from 3333 paise. |
 | **Indexes on every foreign key** | Postgres doesn't index foreign keys automatically. The balance queries filter and group on exactly these columns. `group_members.user_id` has its own index because the composite primary key only helps lookups that start with `group_id`. |
 | **`timestamptz`** | Stored in UTC, with no ambiguity across time zones. |
 | **Phone numbers in E.164** | Normalised with the `phonenumbers` library before storing (`98765-43210` becomes `+919876543210`), so one number written different ways is one user. Numbers without a country code are read as Indian. |
-| **`split_strategy` as `VARCHAR` + `CHECK`**, not a Postgres `ENUM` | Adding a strategy later is a one-line constraint change; altering an `ENUM` type is awkward and can't run inside every migration. |
-| **Soft-delete and edit timestamps on the row** | `deleted_at` keeps deleted expenses and settlements (and their shares) for the audit trail; `updated_at` shows when a record last changed. |
-| **The idempotency key stored on the row** | The key commits in the same transaction as the expense or settlement it created, so the two can never disagree, and there's no separate table to expire or clean up. |
+| **`split_strategy` as `VARCHAR` + `CHECK`**, not a Postgres `ENUM` | A `CHECK` can be replaced to add, rename or retire a strategy. Postgres can add values to an `ENUM` but can't remove or rename them without recreating the type. |
 
 ---
 
@@ -377,16 +361,7 @@ net = (what you paid for expenses) − (your shares) + (settlements you paid) �
 
 ### Calculated, not stored
 
-| | Calculated on read (chosen) | Stored running balances |
-|---|---|---|
-| Correctness | Always right: there is nothing to drift out of sync | Every write path must update balances perfectly, forever |
-| Edits and deletes | Free: the next read reflects them | Need a matching reversal for every change |
-| Read cost | A fixed number of `SUM … GROUP BY` queries (4 for a group, 5 for a user across *all* their groups), on indexed columns | One row lookup |
-| Write cost | One insert | Insert plus balance updates, with lock contention on hot rows |
-
-At this scale, correctness wins. If reads ever became the bottleneck, a cache or materialized view could be added **in front of** the source of truth without changing the model.
-
-The query count doesn't grow with the number of groups. A user's totals across 50 groups are still 5 queries, not 4 × 50 + 1. This avoids the N+1 query problem.
+Balances are never stored, so there's nothing to drift out of sync, and edits and deletes need no balance reversals: the next read simply reflects them. The cost is a fixed number of `SUM … GROUP BY` queries on indexed columns: 4 for a group, and 5 for a user across *all* their groups, so 50 groups is still 5 queries, not 4 × 50 + 1 (no N+1 problem). If reads ever became the bottleneck, a cache or materialized view could sit **in front of** the source of truth.
 
 **Every list has a fixed order**, so the same data always gives the same response: members and balances by name, a user's groups by group name, shares by user id, expenses and settlements newest first (with the time-ordered id as a tie-break).
 
@@ -413,14 +388,7 @@ Before (debts as recorded)            After simplification
 2. The **biggest debtor pays the biggest creditor** as much as they can.
 3. Whoever reaches 0 drops out, and the rest repeat.
 
-Two heaps make it O(n log n). Ties are broken by user id, so the output is deterministic.
-
-| Property | Why it holds | Tested by |
-|---|---|---|
-| Settles every net exactly | each payment moves money from a debtor to a creditor | property test |
-| At most n − 1 payments | each payment brings at least one person to 0 | property test |
-| Payments come biggest first | the largest remaining debt and credit only ever shrink | property test |
-| Deterministic | user-id tie-break | property test |
+Two heaps make it O(n log n), and ties are broken by user id, so the output is deterministic. Property tests check that the payments settle every net exactly, that there are at most n − 1 of them (each payment brings someone to 0), and that they come biggest first.
 
 **Trade-off:** the *true* minimum number of payments is **NP-hard**. It means splitting people into the most subsets whose nets sum to 0. Greedy is the standard practical answer, and its n − 1 bound is tight in the worst case.
 
@@ -485,11 +453,8 @@ sequenceDiagram
 | seen, with a *different* request | 422: the key was reused for something else (a client bug) |
 | seen, but that row was since deleted | 409: already processed; a late retry never brings back a deliberate delete |
 
-- **Required, not optional.** Public APIs such as Stripe make the key optional because they serve third-party clients they don't control. This is a first-party backend recording money, so safe retries are part of the contract, and a client that forgets the key fails immediately instead of creating duplicates later.
-- **The client generates the key:** a random UUID per user action, reused only by that action's retries. It's never derived from the user or the content, because two genuine ₹200 coffees must stay two expenses.
-- **The fingerprint is a check, not the key.** It's a SHA-256 of a *canonical* form of the request (splits sorted, `"50"` = `"50.00"`, names trimmed), so a retry that rebuilds the body slightly differently still matches.
-- **The key lives on the row**, written in the same transaction, so the row and its key can never disagree. Stripe-style separate tables generalise to any endpoint but need expiry and cleanup.
-- **PUT and DELETE need no key:** repeating them leaves the same state.
+- **The client generates the key:** a random UUID per user action, reused only by that action's retries, never derived from the user or the content (two genuine ₹200 coffees must stay two expenses). It's required, not optional as in public APIs like Stripe, because this is a first-party backend recording money.
+- **The fingerprint is a check, not the key:** a SHA-256 of a *canonical* form of the request (splits sorted, `"50"` = `"50.00"`), so a retry that rebuilds the body slightly differently still matches. PUT and DELETE need no key: repeating them leaves the same state.
 
 Full client contract and edge cases: [DESIGN.md decision 10](DESIGN.md#tables-rules-and-decisions).
 
@@ -500,7 +465,7 @@ Full client contract and edge cases: [DESIGN.md decision 10](DESIGN.md#tables-ru
 | Decision | Alternative considered | Why this one | What it costs |
 |---|---|---|---|
 | **PostgreSQL** | MongoDB or another document store | The data is relational (users ↔ groups ↔ expenses ↔ shares), balances are aggregations, and correctness depends on transactions and constraints | — |
-| **Integer paise** | `float` / `NUMERIC` rupees | Exact arithmetic; integer `SUM`s are fast | Convert to rupees for display |
+| **Integer paise in `BIGINT`** | `float` / `NUMERIC` rupees | Exact arithmetic (no `0.1 + 0.2 ≠ 0.3`); integer `SUM`s are fast; `BIGINT` holds ₹92 quadrillion where `INT` stops at ₹2.1 crore | Convert to rupees for display |
 | **`Decimal` for percentages** | `float` | 33.33 % is exact; the rounding rule is applied explicitly, never by accident | — |
 | **Amounts capped at 10¹² paise (₹1000 crore)** | No cap (BIGINT's own limit) | An oversized amount is a clear 422 instead of a database overflow (500) | Larger single amounts aren't accepted |
 | **Three layers: routers, services, domain** | Logic in the route handlers | The split maths is pure and unit-testable; each rule lives in one place; errors don't know about HTTP | A little more structure for a small app |
@@ -520,7 +485,7 @@ Full client contract and edge cases: [DESIGN.md decision 10](DESIGN.md#tables-ru
 | **Greedy debt simplification** | An exact minimum | Exact is NP-hard; greedy is ≤ n − 1 and O(n log n) | Occasionally one more payment than optimal |
 | **`create_all` on startup** | Alembic migrations | Fewer moving parts for a project with no deployed data | A model change needs `docker compose down -v` |
 | **No auth: requests carry no caller identity** | JWT or sessions | This version focuses on the splitting and balance logic; the design leaves a clear place for auth (§13) | Any client can read or change any group, and changes aren't attributed to anyone |
-| **Sync endpoints** | `async` + asyncpg | SQLAlchemy sync is simpler and runs in FastAPI's thread pool; the load is I/O-light | Fewer concurrent requests per worker than async |
+| **Sync endpoints** | `async` + asyncpg | Simpler code; FastAPI runs sync endpoints in a thread pool, which is plenty for this workload | Fewer concurrent requests per worker than async under heavy load |
 | **Tests on real Postgres** | SQLite in memory | The behaviour under test *is* Postgres: `ON CONFLICT`, row locks, snapshots, constraint names | Tests need Docker (about a minute) |
 | **Containers run as a non-root user** | The image default (root) | Least privilege: a compromised process can't rewrite the code (owned by root) or act as root | — |
 
@@ -556,7 +521,7 @@ Full request and response bodies, and every error case, are in **[DESIGN.md §3]
 - The status code carries success or failure.
 - Business-rule errors return `{"detail": "<readable reason>"}`.
 - Request-shape errors (from Pydantic) return `{"detail": [{"loc": [...], "msg": "..."}]}`.
-- **404** means the thing doesn't exist. **422** means it exists but the request breaks a rule, e.g. the user isn't a member of this group.
+- **404** means the thing doesn't exist. **422** means it exists but the request breaks a rule, e.g. the user isn't a member of this group. A malformed id in the path (not a UUID) is also a 422.
 - Amounts are integers in paise from 1 to 10¹². POSTs that record money **require** an `Idempotency-Key: <uuid>` header (400 if missing).
 - Lists have a fixed order (see [§6](#6-how-balances-work)). They aren't paginated yet (§13).
 
@@ -612,7 +577,7 @@ What is deliberately out of scope, and what a production version would add:
 | **Schema changes** | `create_all` on startup | **Alembic** migrations, run as a deploy step |
 | **Concurrent edits** | Last write wins (writes are serialized, so nothing is corrupted) | Optimistic locking: a version exposed as an `ETag`; edits send `If-Match`, 412 if stale, 428 if missing |
 | **Partial edits** | `PUT` (full replacement, pre-filled from GET) | `PATCH`, merging the changed fields with the stored split, now possible because the split is stored as entered |
-| **Edit history and undo** | Edits overwrite; deletes are soft | An append-only `audit_log` (entity, action, `actor_id`, `before` / `after` JSONB snapshots incl. shares, timestamp), written **in the same transaction** as each create, update and delete. It powers an activity feed and undo, where undo is itself a new logged operation, never a rewrite of the log. Undo can be limited to a 30-day window, but the log itself is kept long-term (money disputes need it), with monthly partitions so old data can be archived cheaply. Needs auth first, so `actor_id` can record *who*. |
+| **Edit history and undo** | Edits overwrite; deletes are soft | An append-only `audit_log` (entity, action, `actor_id`, before/after snapshots), written **in the same transaction** as each change, powering an activity feed and undo (undo is a new logged operation). Undo can be limited to 30 days, but the log is kept long-term, partitioned by month. Needs auth first, for `actor_id`. |
 | **Lists** | Not paginated | Cursor pagination on `(created_at, id)`, cheap because ids are UUIDv7 |
 | **Read performance** | Calculated on every request | Partial indexes `WHERE deleted_at IS NULL`; a cached or materialized balance view if reads dominate |
 | **Balance queries** | A few `SUM` queries per use case, each applying the soft-delete filter | One ledger subquery (signed entries per person and counterparty) that all balance views read, so the filter lives in one place |
@@ -623,7 +588,7 @@ What is deliberately out of scope, and what a production version would add:
 | **Groups and users** | Members can't leave; users and groups can't be deleted | Leaving or removal, allowed only at a zero balance; deleting a group or account, with its history kept |
 | **Notifications** | None | Tell members when an expense involving them is added, edited or deleted, driven by the audit log |
 | **Frontend** | None: the API, with Swagger docs | Web or mobile client: generates idempotency keys, pre-fills edit forms from GET |
-| **Operations** | `/health`, logging of database failures, containers run as non-root | Structured logs with request ids, metrics, tracing, rate limiting, CI running the test suite on every PR, a pinned and scanned base image |
+| **Operations** | `/health`, logging of database failures, containers run as non-root, the app image holds only `app/` | Structured logs with request ids, metrics, tracing, rate limiting, CI running the test suite on every PR, a pinned and scanned base image |
 
 ---
 
