@@ -6,6 +6,7 @@ calculated from expenses, expense_shares and settlements.
 
 import uuid
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import (
     BigInteger,
@@ -13,6 +14,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     MetaData,
+    Numeric,
     String,
     UniqueConstraint,
     func,
@@ -83,6 +85,9 @@ class Expense(Base):
     __tablename__ = "expenses"
     __table_args__ = (
         CheckConstraint("amount > 0", name="amount_positive"),
+        CheckConstraint(
+            "split_strategy IN ('equal', 'exact', 'percentage')", name="split_strategy_valid"
+        ),
         *idempotency_constraints(),
     )
 
@@ -91,6 +96,9 @@ class Expense(Base):
     name: Mapped[str] = mapped_column(String(200))
     amount: Mapped[int] = mapped_column(BigInteger)  # paise
     paid_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    # How the split was entered (decision 3), so a client can show it again when editing.
+    # Balances never read it: they use the calculated shares.
+    split_strategy: Mapped[str] = mapped_column(String(20))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -118,7 +126,10 @@ ACTIVE_EXPENSE = Expense.deleted_at.is_(None)
 
 class ExpenseShare(Base):
     __tablename__ = "expense_shares"
-    __table_args__ = (CheckConstraint("amount > 0", name="amount_positive"),)
+    __table_args__ = (
+        CheckConstraint("amount > 0", name="amount_positive"),
+        CheckConstraint("input_value > 0", name="input_value_positive"),  # NULL passes
+    )
 
     # Composite PK: a user has at most one share per expense.
     expense_id: Mapped[uuid.UUID] = mapped_column(
@@ -127,7 +138,9 @@ class ExpenseShare(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id"), primary_key=True, index=True
     )
-    amount: Mapped[int] = mapped_column(BigInteger)  # paise
+    amount: Mapped[int] = mapped_column(BigInteger)  # paise, calculated: what balances use
+    # The value as entered: a percent (33.33) or exact paise, NULL for an equal split.
+    input_value: Mapped[Decimal | None] = mapped_column(Numeric(15, 2))
 
     expense: Mapped[Expense] = relationship(back_populates="shares")
 

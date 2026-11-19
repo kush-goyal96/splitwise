@@ -38,9 +38,13 @@ def test_edit_can_change_who_is_in_the_split(api, trip, dinner):
 
 
 def test_edit_can_change_the_strategy(api, trip, dinner):
+    assert dinner["split_strategy"] == "equal"
     edited = api.edit_expense(trip.group, dinner["id"], amount=90000, paid_by=trip.shivanshu,
                               strategy="percentage", splits=values({trip.kush: 10, trip.ansh: 90}))
     assert shares_of(edited) == {trip.kush: 9000, trip.ansh: 81000}
+    # The stored inputs follow the edit, so the next edit form shows the new split.
+    assert edited["split_strategy"] == "percentage"
+    assert {s["user_id"]: s["value"] for s in edited["splits"]} == {trip.kush: "10.00", trip.ansh: "90.00"}
 
 
 def test_edit_can_change_the_payer_and_debts_move_with_it(api, trip, dinner):

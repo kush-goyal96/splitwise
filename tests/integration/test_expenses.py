@@ -6,6 +6,7 @@ kind of error proves the wiring: the right status, a readable message, and nothi
 
 import uuid
 from datetime import datetime
+from decimal import Decimal
 
 import pytest
 from uuid6 import uuid7
@@ -56,11 +57,46 @@ def test_largest_allowed_amount(api, trip):
 
 def test_response_shape(api, trip):
     expense = api.add_expense(trip.group, amount=90000, paid_by=trip.kush, name="  Dinner  ")
-    assert set(expense) == {"id", "name", "amount", "paid_by", "created_at", "updated_at", "shares"}
+    assert set(expense) == {"id", "name", "amount", "paid_by", "created_at", "updated_at",
+                            "split_strategy", "splits", "shares"}
     assert expense["name"] == "Dinner"
     assert expense["updated_at"] is None
     assert uuid.UUID(expense["id"]).version == 7
     assert datetime.fromisoformat(expense["created_at"]).tzinfo is not None
+
+
+# ---------- The split as entered (for pre-filling an edit form) ----------
+
+
+@pytest.mark.parametrize("strategy, entered", [
+    ("equal", lambda t: {t.kush: None, t.ansh: None}),
+    ("exact", lambda t: {t.kush: 60000, t.ansh: 30000}),
+    ("percentage", lambda t: {t.kush: "33.33", t.ansh: "66.67"}),
+])
+def test_the_split_comes_back_as_entered_and_can_be_sent_back_unchanged(api, trip, strategy, entered):
+    entered = entered(trip)
+    splits = [{"user_id": u} if v is None else {"user_id": u, "value": v} for u, v in entered.items()]
+    expense = api.add_expense(trip.group, amount=90000, paid_by=trip.kush, strategy=strategy, splits=splits)
+
+    fetched = api.get_expense(trip.group, expense["id"])
+    assert fetched["split_strategy"] == strategy
+    assert {s["user_id"]: s["value"] for s in fetched["splits"]} == {
+        u: None if v is None else str(Decimal(str(v)).quantize(Decimal("0.01"))) for u, v in entered.items()
+    }
+
+    # An edit form pre-filled from the GET, saved with only the name changed, keeps the split.
+    resaved = api.edit_expense(trip.group, expense["id"], amount=90000, paid_by=trip.kush, name="Renamed",
+                               strategy=fetched["split_strategy"], splits=fetched["splits"])
+    assert resaved["shares"] == expense["shares"]
+    assert resaved["splits"] == fetched["splits"]
+
+
+def test_equal_with_no_list_stores_the_members_at_that_moment(api, trip):
+    expense = api.add_expense(trip.group, amount=90000, paid_by=trip.kush)
+    api.add_members(trip.group, [trip.riya])  # joins later: not part of the old expense
+    fetched = api.get_expense(trip.group, expense["id"])
+    assert sorted(s["user_id"] for s in fetched["splits"]) == sorted(trip.members)
+    assert all(s["value"] is None for s in fetched["splits"])
 
 
 # (overrides, expected detail): a string is a business-rule 422 with that message;
@@ -114,7 +150,7 @@ def test_list_breaks_created_at_ties_by_id(api, trip, db):
     older_id, newer_id = uuid7(), uuid7()
     for expense_id in (older_id, newer_id):
         db.add(Expense(
-            **keyed(), id=expense_id, group_id=uuid.UUID(trip.group), name="Same time", amount=100,
+            **keyed(), split_strategy="equal", id=expense_id, group_id=uuid.UUID(trip.group), name="Same time", amount=100,
             paid_by=uuid.UUID(trip.kush), shares=[ExpenseShare(user_id=uuid.UUID(trip.kush), amount=100)],
         ))
     db.commit()

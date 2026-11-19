@@ -63,17 +63,19 @@ erDiagram
         string name
         BIGINT amount "paise"
         UUID paid_by FK
+        string split_strategy "as entered"
         DATETIME created_at
         DATETIME updated_at "nullable"
         DATETIME deleted_at "nullable, soft delete"
-        UUID idempotency_key "nullable"
-        string request_fingerprint "nullable"
+        UUID idempotency_key
+        string request_fingerprint
     }
 
     expense_shares {
         UUID expense_id PK, FK
         UUID user_id PK, FK
-        BIGINT amount "paise"
+        BIGINT amount "paise, calculated"
+        NUMERIC input_value "as entered, nullable"
     }
 
     settlements {
@@ -85,8 +87,8 @@ erDiagram
         DATETIME created_at
         DATETIME updated_at "nullable"
         DATETIME deleted_at "nullable, soft delete"
-        UUID idempotency_key "nullable"
-        string request_fingerprint "nullable"
+        UUID idempotency_key
+        string request_fingerprint
     }
 
     users ||--o{ group_members : joins
@@ -129,6 +131,7 @@ expenses
   name            string
   amount          BIGINT   (paise)
   paid_by         UUIDv7   FK -> users.id
+  split_strategy  string   equal | exact | percentage, as entered (decision 3)
   created_at      DATETIME
   updated_at      DATETIME NULL   (set on edit)
   deleted_at      DATETIME NULL   (soft delete: NULL = active)
@@ -139,7 +142,8 @@ expenses
 expense_shares
   expense_id      UUIDv7   FK -> expenses.id
   user_id         UUIDv7   FK -> users.id
-  amount          BIGINT   (paise)
+  amount          BIGINT   (paise, calculated: what balances use)
+  input_value     NUMERIC(15,2) NULL  (as entered: a percent or exact paise; NULL for equal)
   PK (expense_id, user_id)
 
 settlements
@@ -181,9 +185,14 @@ DECISIONS
    Each balance use case reads from a single REPEATABLE READ snapshot, so its several
    queries can't see a concurrent write halfway through (nets always sum to 0).
 
-3. Every share is stored explicitly, including for equal splits.
+3. Every share is stored explicitly, including for equal splits, next to the split as entered.
    An equal split of ₹100 between 3 people becomes 3 expense_shares rows.
-   The balance logic never needs to know how an expense was split.
+   The calculated amount is the source of truth: the balance logic never needs to know how
+   an expense was split. The inputs are stored too (expenses.split_strategy and
+   expense_shares.input_value), so a client can show the split again when the expense is
+   edited: 33.33 / 33.33 / 33.34 % can't be recovered from 3333 / 3333 / 3334 paise.
+   An equal split with no list stores who was in the group at that moment, so a member
+   who joins later doesn't change an old expense.
 
 4. The leftover paisa from an equal split goes to the payer.
    e.g. 10000 / 3 = 3333 each with 1 left over, so the payer's share is 3334.
@@ -226,8 +235,9 @@ DECISIONS
    defined once in models.py. A deleted row is a 404 everywhere.
    The one deliberate exception is the Idempotency-Key lookup (decision 10): a deleted row
    still owns its key, so a late retry must be able to find it.
-   Edits are full replacements (PUT, not PATCH): only the calculated shares are stored,
-   not the split strategy or its values, so a partial update couldn't recalculate them.
+   Edits are full replacements (PUT): the client sends the split again, pre-filled from the
+   inputs a GET returns (decision 3). Because the inputs are stored, a PATCH that changes
+   only the amount could recalculate the shares from them; it isn't built yet.
    The old shares are deleted and the new ones inserted in one transaction.
    Edits overwrite the old values; keeping every version would need a revisions table.
    Settlements are independent of expenses (people settle a running balance, not a bill),
@@ -409,6 +419,8 @@ POST /groups/{group_id}/expenses
   response 201 {
     id, name, amount, paid_by, created_at
     updated_at                         <- null until the expense is edited
+    split_strategy                     <- as entered
+    splits   [ { user_id, value } ]    <- as entered, the request's shape (to pre-fill an edit)
     shares   [ { user_id, amount } ]   <- the calculated paise per person, ordered by user_id
   }
   errors

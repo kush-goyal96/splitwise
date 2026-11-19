@@ -126,6 +126,13 @@ class ShareRead(ORMModel):
     amount: int
 
 
+class SplitRead(ORMModel):
+    """One split entry as it was entered: the same shape as SplitEntry in the request."""
+
+    user_id: uuid.UUID
+    value: Decimal | None = Field(validation_alias="input_value")
+
+
 class ExpenseRead(ORMModel):
     id: uuid.UUID
     name: str
@@ -133,6 +140,10 @@ class ExpenseRead(ORMModel):
     paid_by: uuid.UUID
     created_at: datetime
     updated_at: datetime | None
+    # The split as entered, in the request's shape, so a client can pre-fill an edit form...
+    split_strategy: SplitStrategy
+    splits: list[SplitRead] = Field(validation_alias="shares")
+    # ...and the calculated paise per person, which is what balances use.
     shares: list[ShareRead]
 
 

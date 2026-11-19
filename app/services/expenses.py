@@ -49,7 +49,8 @@ def create_expense(
         name=name,
         amount=amount,
         paid_by=paid_by,
-        shares=_share_rows(shares),
+        split_strategy=strategy.value,
+        shares=_share_rows(shares, splits),
         idempotency_key=idempotency_key,
         request_fingerprint=fingerprint,
     )
@@ -93,6 +94,7 @@ def update_expense(
     expense.name = name
     expense.amount = amount
     expense.paid_by = paid_by
+    expense.split_strategy = strategy.value
     # Set explicitly: an edit that only changes the shares wouldn't otherwise touch this row.
     expense.updated_at = func.now()
 
@@ -101,7 +103,7 @@ def update_expense(
     # and the composite primary key would collide.
     expense.shares.clear()
     db.flush()
-    expense.shares.extend(_share_rows(shares))
+    expense.shares.extend(_share_rows(shares, splits))
 
     # One commit: readers see either the old expense or the new one, never a mix.
     db.commit()
@@ -193,5 +195,11 @@ def _calculate_shares(
     return calculate_shares(amount, strategy, splits, paid_by, member_ids)
 
 
-def _share_rows(shares: dict[uuid.UUID, int]) -> list[ExpenseShare]:
-    return [ExpenseShare(user_id=user_id, amount=paise) for user_id, paise in shares.items()]
+def _share_rows(shares: dict[uuid.UUID, int], splits: Splits) -> list[ExpenseShare]:
+    """One row per participant: the calculated paise, plus the value as entered (None for
+    an equal split, including "no list = all members", which stores who was in the group)."""
+    entered = dict(splits)
+    return [
+        ExpenseShare(user_id=user_id, amount=paise, input_value=entered.get(user_id))
+        for user_id, paise in shares.items()
+    ]
