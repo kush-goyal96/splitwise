@@ -15,11 +15,12 @@ from typing import Any
 from fastapi.testclient import TestClient
 from httpx2 import Response
 
-_phone_numbers = itertools.count(1_000_000_000)
+_phone_numbers = itertools.count(10_000_000)
 
 
 def unique_phone() -> str:
-    return f"+91{next(_phone_numbers)}"
+    # A valid Indian mobile number (+91 98xxxxxxxx), already in the E.164 form the API stores.
+    return f"+9198{next(_phone_numbers)}"
 
 
 def equal(*user_ids: str) -> list[dict]:

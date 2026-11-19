@@ -119,7 +119,7 @@ models.py; every foreign key is named fk_<table>_<column>_<referenced table>.
 
 users
   id                   UUID (v7)        PK                          pk_users
-  phone_number         VARCHAR(20)      UNIQUE                      uq_users_phone_number
+  phone_number         VARCHAR(20)      UNIQUE, E.164               uq_users_phone_number
   user_name            VARCHAR(100)
 
 groups
@@ -361,6 +361,11 @@ DECISIONS
      a user's groups                    by group name, then id
      expense and settlement lists       newest first (created_at DESC, id DESC)
      simplified payments                biggest first, ties by user id
+
+12. Phone numbers are stored in E.164 (+919876543210), normalised with the phonenumbers library.
+   9876543210, +91 98765 43210 and 98765-43210 are one number, so they are one user, and the
+   UNIQUE constraint catches the duplicate. Numbers without a country code are read as Indian;
+   anything that isn't a valid number for its country is a 422.
 ```
 
 ## 3. API
@@ -389,9 +394,10 @@ POST /users
     id, phone_number, user_name
   }
   errors
-    409  phone_number already exists (after stripping surrounding whitespace)
+    409  phone_number already exists (compared after normalising to E.164, decision 12)
     422  user_name blank or over 100 characters
-         phone_number not 7-15 digits with an optional leading +
+         phone_number not a valid number (no country code = India); spaces and dashes are fine
+  The stored phone_number is the E.164 form, e.g. "98765 43210" is returned as "+919876543210".
 
 
 GROUPS

@@ -297,7 +297,7 @@ These hold even if application code has a bug, and each one has a test that writ
 | Money is positive | `ck_expenses_amount_positive`, `ck_expense_shares_amount_positive`, `ck_settlements_amount_positive` |
 | The split as entered is valid | `ck_expenses_split_strategy_valid` (one of the three strategies), `ck_expense_shares_input_value_positive` |
 | You can't pay yourself | `ck_settlements_payer_not_payee` |
-| One account per phone number | `uq_users_phone_number` |
+| One account per phone number | `uq_users_phone_number`, on the E.164 form, so `9876543210` and `+91 98765 43210` are the same number |
 | A user is in a group once | `pk_group_members (group_id, user_id)` |
 | One share per person per expense | `pk_expense_shares (expense_id, user_id)` |
 | References exist | foreign keys on every `*_id` column |
@@ -324,6 +324,7 @@ They need more than one row, so a CHECK constraint can't express them:
 | **Every share stored, even for equal splits, next to the split as entered** | Balance queries only read the calculated `amount`: a share is a share. The inputs (`split_strategy`, `input_value`) are kept so an edit form can show the split again; 33.33 % can't be recovered from 3333 paise. |
 | **Indexes on every foreign key** | Postgres doesn't index foreign keys automatically. The balance queries filter and group on exactly these columns. `group_members.user_id` has its own index because the composite primary key only helps lookups that start with `group_id`. |
 | **`timestamptz`** | Stored in UTC, with no ambiguity across time zones. |
+| **Phone numbers in E.164** | Normalised with the `phonenumbers` library before storing (`98765-43210` becomes `+919876543210`), so one number written different ways is one user. Numbers without a country code are read as Indian. |
 | **`split_strategy` as `VARCHAR` + `CHECK`**, not a Postgres `ENUM` | Adding a strategy later is a one-line constraint change; altering an `ENUM` type is awkward and can't run inside every migration. |
 | **Soft-delete and edit timestamps on the row** | `deleted_at` keeps deleted expenses and settlements (and their shares) for the audit trail; `updated_at` shows when a record last changed. |
 | **The idempotency key stored on the row** | The key commits in the same transaction as the expense or settlement it created, so the two can never disagree, and there's no separate table to expire or clean up. |
@@ -532,7 +533,7 @@ Full request and response bodies, and every error case, are in **[DESIGN.md §3]
 | Method | Path | Success | Errors |
 |---|---|---|---|
 | `GET` | `/health` | 200 | 503 if the database is down |
-| `POST` | `/users` | 201 | 409 duplicate phone · 422 |
+| `POST` | `/users` | 201 (phone stored in E.164) | 409 duplicate phone · 422 invalid phone or name |
 | `POST` | `/groups` | 201 | 422 |
 | `GET` | `/groups/{group_id}` | 200 (with members) | 404 |
 | `POST` | `/groups/{group_id}/members` | 200 (full member list; idempotent) | 404 group or user · 422 |
@@ -616,7 +617,6 @@ What is deliberately out of scope, and what a production version would add:
 | **Read performance** | Calculated on every request | Partial indexes `WHERE deleted_at IS NULL`; a cached or materialized balance view if reads dominate |
 | **Balance queries** | A few `SUM` queries per use case, each applying the soft-delete filter | One ledger subquery (signed entries per person and counterparty) that all balance views read, so the filter lives in one place |
 | **Membership rule** | Checked in application code | Also enforced by the database: composite foreign keys from expenses, shares and settlements to `group_members` |
-| **Phone numbers** | Validated as 7–15 digits; `+919800000001` and `919800000001` are different users | Normalised to E.164 (e.g. with the `phonenumbers` library) before storing |
 | **Money** | One currency (INR) | A currency column per group or expense; conversion at a recorded rate |
 | **Expenses** | One payer | Multiple payers: a `payments` table mirroring `expense_shares` |
 | **Groups and users** | Members can't leave; users and groups can't be deleted | Leaving or removal, allowed only at a zero balance; deleting a group or account, with its history kept |

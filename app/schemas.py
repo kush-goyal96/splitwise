@@ -10,7 +10,8 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+import phonenumbers
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from app.domain.splits import SplitStrategy
 
@@ -20,8 +21,27 @@ from app.domain.splits import SplitStrategy
 Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
 ExpenseName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
 
-# Optional leading +, then 7-15 digits (the E.164 limit). Spaces and dashes are not allowed.
-PhoneNumber = Annotated[str, StringConstraints(strip_whitespace=True, pattern=r"^\+?[0-9]{7,15}$")]
+# Numbers without a country code are read as Indian.
+DEFAULT_PHONE_REGION = "IN"
+
+
+def normalise_phone(value: str) -> str:
+    """Store every phone number in E.164 (e.g. +919876543210), so one number written
+    different ways (9876543210, +91 98765 43210, 98765-43210) is one user, and the UNIQUE
+    constraint catches the duplicate."""
+    try:
+        number = phonenumbers.parse(value, DEFAULT_PHONE_REGION)
+    except phonenumbers.NumberParseException:
+        raise ValueError("not a valid phone number") from None
+    if not phonenumbers.is_valid_number(number):
+        raise ValueError("not a valid phone number")
+    return phonenumbers.format_number(number, phonenumbers.PhoneNumberFormat.E164)
+
+
+# Bounded before parsing; E.164 is at most 16 characters, well within the VARCHAR(20) column.
+PhoneNumber = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=32), AfterValidator(normalise_phone)
+]
 
 # Largest amount accepted: 10^12 paise = ₹1000 crore per expense or settlement.
 # A business limit far inside BIGINT (about 9.2 x 10^18), so oversized input is a 422,

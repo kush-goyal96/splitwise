@@ -29,12 +29,30 @@ def test_duplicate_phone_number_is_409_and_creates_nothing(client, db):
     assert db.scalar(select(func.count()).select_from(User)) == 1
 
 
-@pytest.mark.parametrize("phone, status", [
-    ("1234567", 201), ("+123456789012345", 201),               # 7 and 15 digits: the limits
-    ("123456", 422), ("1234567890123456", 422), ("98765-43210", 422),
-], ids=["7 digits", "15 digits", "6 digits", "16 digits", "dash"])
-def test_phone_number_format(client, phone, status):
-    assert client.post("/users", json={"phone_number": phone, "user_name": "U"}).status_code == status
+@pytest.mark.parametrize("phone, stored", [
+    ("9876543210", "+919876543210"),          # no country code: read as Indian
+    ("+91 98765 43210", "+919876543210"),     # spaces
+    ("98765-43210", "+919876543210"),         # dashes
+    ("+14155552671", "+14155552671"),         # another country
+], ids=["national", "spaces", "dashes", "international"])
+def test_phone_numbers_are_stored_in_e164(client, phone, stored):
+    response = client.post("/users", json={"phone_number": phone, "user_name": "U"})
+    assert response.status_code == 201
+    assert response.json()["phone_number"] == stored
+
+
+def test_one_number_written_two_ways_is_one_user(client):
+    assert client.post("/users", json={"phone_number": "9876543210", "user_name": "A"}).status_code == 201
+    response = client.post("/users", json={"phone_number": "+91 98765 43210", "user_name": "B"})
+    assert response.status_code == 409
+
+
+@pytest.mark.parametrize("phone", ["123456", "+911234", "abcdefghij", "", "9" * 40],
+                         ids=["too short", "too short with code", "letters", "empty", "too long"])
+def test_invalid_phone_numbers_are_422(client, phone):
+    response = client.post("/users", json={"phone_number": phone, "user_name": "U"})
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["loc"] == ["body", "phone_number"]
 
 
 @pytest.mark.parametrize("name, status", [("   ", 422), ("x" * 100, 201), ("x" * 101, 422)],
